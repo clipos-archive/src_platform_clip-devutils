@@ -1,0 +1,265 @@
+#!/usr/bin/env bash
+# SPDX-License-Identifier: LGPL-2.1-or-later
+# Copyright © 2007-2018 ANSSI. All Rights Reserved.
+
+# Safe shell defaults
+# export LANG="C.UTF-8"
+# export LC_ALL="C.UTF-8"
+set -eu
+set -o pipefail
+# Force debug output
+set -x
+
+# This is an helper script to help maintain patches for the CLIP kernel.
+# It must be run inside the linux-vserver git repository.
+#
+# We keep vanilla versions of the grsecurity and vserver patches. The vserver
+# patches are forward ported from the version 4.1.18-vs2.3.8.4 (and seccussive
+# one) available upstream and in the linux-4.1.18-vserver* branches.
+#
+# This script will prepare the required branches for a new version of the
+# kernel and perform the automatic extraction of conflicts part of the vserver
+# and grsecurity patch.
+
+
+if [[ "${#}" -ne 1 ]]; then
+	printf "Need a configuration file based on this template as argument:\n"
+	cat <<EOF
+# Kernel version to base the new tree on.
+# KERNEL_VERSION="4.4.13"
+KERNEL_VERSION=
+
+# grsecurity patch version
+# GRSECURITY_PATCH_VERSION="3.1-4.4.13-201606222149"
+GRSECURITY_PATCH_VERSION=""
+
+# grsecurity patch to apply
+# This is optionnal and is only required if the branch does not already exist
+# GRSECURITY_PATCH="../grsecurity-\${GRSECURITY_PATCH_VERSION}.patch"
+GRSECURITY_PATCH=""
+
+# vserver patch version
+# VSERVER_VERSION="vs2.3.8.4"
+VSERVER_VERSION=""
+
+# Revision of the vserver patch forwarded ported by the LAM.
+# VSERVER_ANSSI_REVISION="1"
+VSERVER_ANSSI_REVISION=""
+
+# Vserver branch to cherry-pick commits from.
+# This is optionnal and is only required if the branch does not already exist.
+# You should use this option only when moving from one version of the
+# patch/kernel to another.
+# VSERVER_CHERRYPICK_BRANCH="linux-4.4.11-vserver-vs2.3.8.4-anssi-2"
+VSERVER_CHERRYPICK_BRANCH=""
+
+# The tag referencing the commit resolveing vserver/grsecurity merge conflicts
+VSGR_FIX_TAG=""
+
+# The CLIP revision number for this patchset
+# CLIP_REVISION="1"
+CLIP_REVISION=""
+
+# The branch to cherry-pick CLIP, CLIP LSM & KCCSD patches from
+# CLIP_PATCHES_BRANCH="linux-4.4.13-clip-1-devel"
+# FIXME
+# CLIP_PATCHES_BRANCH=""
+EOF
+	exit 1
+fi
+
+CONFIG_FILE="${1}"
+
+if [[ ! -f "${CONFIG_FILE}" ]];then
+	printf "Error: Configuration file '%s' not found.\n" "${CONFIG_FILE}"
+	exit 1
+fi
+
+source "${CONFIG_FILE}"
+
+# Make sure everything is properly configured
+if [ -z "${KERNEL_VERSION}" ]; then
+	printf "'%s' configuration variable is empty.\n" 'KERNEL_VERSION'
+	exit 1
+fi
+if [ -z "${GRSECURITY_PATCH_VERSION}" ]; then
+	printf "'%s' configuration variable is empty.\n" 'GRSECURITY_PATCH_VERSION'
+	exit 1
+fi
+if [ -z "${VSERVER_VERSION}" ]; then
+	printf "'%s' configuration variable is empty.\n" 'VSERVER_VERSION'
+	exit 1
+fi
+if [ -z "${VSERVER_ANSSI_REVISION}" ]; then
+	printf "'%s' configuration variable is empty.\n" 'VSERVER_ANSSI_REVISION'
+	exit 1
+fi
+if [ -z "${VSGR_FIX_TAG=}" ]; then
+	printf "'%s' configuration variable is empty.\n" 'VSGR_FIX_TAG'
+	exit 1
+fi
+if [ -z "${CLIP_REVISION}" ]; then
+	printf "'%s' configuration variable is empty.\n" 'CLIP_REVISION'
+	exit 1
+fi
+
+# FIXME
+# if [ -z "${GRSECURITY_PATCH}" ]; then
+# 	printf "'%s' configuration variable is empty.\n" 'GRSECURITY_PATCH'
+# 	exit 1
+# fi
+# if [ -z "${VSERVER_CHERRYPICK_BRANCH}" ]; then
+# 	printf "'%s' configuration variable is empty.\n" 'VSERVER_CHERRYPICK_BRANCH'
+# 	exit 1
+# fi
+
+check_branch_exist() {
+	if [[ ${#} -ne 1 ]]; then
+		printf "Error: Function check_branch_exist called without argument"
+		exit 1
+	fi
+	local branch="${1}"
+	set +e
+	if git show-ref --verify --quiet refs/heads/"${branch}"; then
+		echo "OK"
+	else
+		echo "KO"
+	fi
+	set -e
+}
+
+# New branches names
+BRANCH_MAIN="linux-${KERNEL_VERSION}"
+BRANCH_GRSEC="linux-${KERNEL_VERSION}-grsec-${GRSECURITY_PATCH_VERSION}"
+BRANCH_VSERVER="linux-${KERNEL_VERSION}-vserver-${VSERVER_VERSION}-anssi-${VSERVER_ANSSI_REVISION}"
+
+# Create the main kernel branch if it does not already exist
+if [[ $(check_branch_exist "${BRANCH_MAIN}") == "KO" ]]; then
+	# Create the main branch
+	git checkout -b "${BRANCH_MAIN}" "v${KERNEL_VERSION}"
+else
+	# Make sure the already existing branch points to the correct tag
+	MAIN_BRANCH_REV="$(git rev-list -n 1 "${BRANCH_MAIN}")"
+	TAG_REV="$(git rev-list -n 1 "v${KERNEL_VERSION}")"
+	if [[ "${MAIN_BRANCH_REV}" != "${TAG_REV}" ]]; then
+		printf "Error: branch %s already exists but does not correspond to the %s tag.\n" \
+			"${BRANCH_MAIN}" "v${KERNEL_VERSION}"
+		exit 1
+	fi
+fi
+
+# Create the grsecurity branch if it does not already exist
+if [[ $(check_branch_exist "${BRANCH_GRSEC}") == "KO" ]]; then
+	# Apply grsecurity patch on linux-<linux_version>-grsec-<grsec_version>
+	git checkout -b "${BRANCH_GRSEC}" "${BRANCH_MAIN}"
+	git apply "${GRSECURITY_PATCH}"
+	git add ./
+	git commit -m "grsecurity: Import patch ${GRSECURITY_PATCH_VERSION}"
+fi
+
+
+# Create the vserver branch if it does not already exist
+if [[ $(check_branch_exist  "${BRANCH_VSERVER}") == "KO" ]]; then
+	# Cherrypick vserver commits from previous known good branch
+	git checkout -b "${BRANCH_VSERVER}" "${BRANCH_MAIN}"
+	# Find the last commit to cherry-pick
+	VSERVER_OLD_BRANCH_HEAD="$(git log -1 --format=%H "${VSERVER_CHERRYPICK_BRANCH}")"
+	git cherry-pick "v${VSERVER_CHERRYPICK_KERNEL_VERSION}..${VSERVER_OLD_BRANCH_HEAD}"
+fi
+
+
+# Create the vserver-parts branch if it does not already exist
+if [[ $(check_branch_exist  "${BRANCH_VSERVER}-parts") == "KO" ]]; then
+	# Create a branch with only the vserver side of the conflicting hunks between
+	# the vserver and gescurity patches.
+	VSERVER_PARTS_TMP_PATCH="./${KERNEL_VERSION}_vserver_${VSERVER_VERSION}_parts.patch"
+	# 1. Merge vserver branch in grsecurity branch but keep grsecurity side of
+	# conflicts.
+	git checkout -b "${BRANCH_GRSEC}-tmp" "${BRANCH_GRSEC}"
+	git merge --no-edit -s recursive -X ours "${BRANCH_VSERVER}"
+	# 2. Revert grsecurity commit in the temporary branch to get the vserver patch
+	# without the conflicting parts.
+	GRSECURITY_COMMIT="$(git log -1 --format=%H "${BRANCH_GRSEC}")"
+	git revert --no-edit "${GRSECURITY_COMMIT}"
+	# 3. Get vserver conflicting parts and re-apply them.
+	git diff "${BRANCH_GRSEC}-tmp" "${BRANCH_VSERVER}" > "${VSERVER_PARTS_TMP_PATCH}"
+	git checkout -b "${BRANCH_VSERVER}-parts" "${BRANCH_MAIN}"
+	patch -p1 -i "${VSERVER_PARTS_TMP_PATCH}"
+	git add ./
+	git commit -m "clip: vs-part-hunks: vserver side of conflicting hunks"
+	# Cleanup
+	git branch -D "${BRANCH_GRSEC}-tmp"
+	rm "${VSERVER_PARTS_TMP_PATCH}"
+fi
+
+
+# Create the grsec-parts branch if it does not already exist
+if [[ $(check_branch_exist  "${BRANCH_GRSEC}-parts") == "KO" ]]; then
+	# Create a branch with only the grsecurity side of the conflicting hunks
+	# between the vserver and gescurity patches.
+	GRSECURITY_PARTS_TMP_PATCH="./${KERNEL_VERSION}_grsecurity_${GRSECURITY_PATCH_VERSION}_parts.patch"
+	# 1. Merge grsecurity branch in vserver branch but keep vserver side of
+	# conflicts.
+	git checkout -b "${BRANCH_VSERVER}-tmp" "${BRANCH_VSERVER}"
+	git merge --no-edit -s recursive -X ours "${BRANCH_GRSEC}"
+	# 2. Revert vserver commits in the temporary branch to get grsec patch without
+	# conflicting parts.
+	VSERVER_BRANCH_HEAD="$(git log -1 --format=%H "${BRANCH_VSERVER}")"
+	git revert --no-edit "v${KERNEL_VERSION}..${VSERVER_BRANCH_HEAD}"
+	# 3. Get grsecurity conflicting parts and re-apply them.
+	git diff "${BRANCH_VSERVER}-tmp" "${BRANCH_GRSEC}" > "${GRSECURITY_PARTS_TMP_PATCH}"
+	git checkout -b "${BRANCH_GRSEC}-parts" "${BRANCH_MAIN}"
+	patch -p1 -i "${GRSECURITY_PARTS_TMP_PATCH}"
+	git add ./
+	git commit -m "clip: vs-part-hunks: grsec side of conflicting hunks"
+	# Cleanup
+	git branch -D "${BRANCH_VSERVER}-tmp"
+	rm "${GRSECURITY_PARTS_TMP_PATCH}"
+fi
+
+
+# Create the vsgr-merge branch if it does not already exist
+if [[ $(check_branch_exist  "${BRANCH_MAIN}-vsgr-merge") == "KO" ]]; then
+	# Setup branch for the merge
+	git checkout -b "${BRANCH_MAIN}-vsgr-merge" "${BRANCH_VSERVER}-parts"
+
+	# Get the latest vsgr-fix commit and cherry-pick it on top of the new branch
+	VSGR_FIX_COMMIT="$(git show --no-patch --format=format:%H "${VSGR_FIX_TAG}")"
+	git cherry-pick "${VSGR_FIX_COMMIT}"
+	# git rebase --interactive HEAD~
+	# Tag the new vsgr-fix commit
+	echo "[+] Pausing automatic merge to allow manual vsgr merge commit fix"
+	read
+	git tag "vsgr-fix-${KERNEL_VERSION}-${CLIP_REVISION}" HEAD
+fi
+
+
+# Do the final merge:
+# 1. Merge vserver parts into vserver
+git checkout "${BRANCH_VSERVER}"
+# Store the HEAD for later revert.
+VSERVER_BRANCH_HEAD="$(git log -1 --format=%H)"
+git merge --no-edit "${BRANCH_VSERVER}-parts"
+# 2. Merge grsec branch into the merge branch
+git checkout "${BRANCH_MAIN}-vsgr-merge"
+git merge --no-edit -s recursive -X ours "${BRANCH_GRSEC}"
+# 3. Merge the vserver branch into the merge branch
+git merge --no-edit "${BRANCH_VSERVER}"
+# 4. Reset the vserver branch
+git checkout "${BRANCH_VSERVER}"
+git reset --hard "${VSERVER_BRANCH_HEAD}"
+
+
+# Rename the merge branch and cherry-pick commits from the previous CLIP branch
+git branch -m "${BRANCH_MAIN}-vsgr-merge" "${BRANCH_MAIN}-clip-${CLIP_REVISION}"
+git checkout "${BRANCH_MAIN}-clip-${CLIP_REVISION}"
+# TODO: cherry-pick commits from the previous branch.
+# git cherry-pick ... CLIP_PATCHES_BRANCH ...
+
+
+# Cleanup work branches
+git branch -D "${BRANCH_VSERVER}-parts" "${BRANCH_GRSEC}-parts"
+
+echo "Done"
+
+exit 0

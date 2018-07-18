@@ -1,0 +1,48 @@
+#!/bin/sh
+# SPDX-License-Identifier: LGPL-2.1-or-later
+# Copyright © 2007-2018 ANSSI. All Rights Reserved.
+#
+#  clip-mkdistfile - make archive and symlink in distfile directories
+#  Copyright (C) 2011 ANSSI
+#  Author: Mickaël Salaün <clipos@ssi.gouv.fr>
+#
+#  All rights reserved.
+#
+
+set -e
+
+if [[ $# -lt 1 ]]; then
+	echo "usage: $0 [-d] <distfile> [distfile] ..." >&2
+	exit 1
+fi
+
+if [ "$1" == "-d" ]; then
+	shift
+	DEVONLY=1
+else
+	DEVONLY=0
+fi
+
+source "/etc/clip-build.conf"
+
+CLIP_DISTFILE="${CLIP_BASE}/distfiles/"
+CLIP_DISTFILEDEV="${CLIP_BASE}/distfiles-dev/"
+
+source "/lib/rc/sh/functions.sh"
+
+die() {
+	eend 1
+	eerror "$@"
+	exit 1
+}
+
+for distfile in "${@}"; do
+	name="$(basename -- "${distfile}")"
+	einfo "Importing ${name}"
+	[ -f "${distfile}" ] || eerror "Distfiles must be files"
+	[ "${DEVONLY}" == 1 ] && CLIP_DISTFILE="${CLIP_DISTFILEDEV}"
+	eindent
+	cp -- "${distfile}" "${CLIP_DISTFILE}" && einfo "in ${CLIP_DISTFILE}"
+	chmod 0600 -- "${CLIP_DISTFILE}/${name}"
+	eoutdent
+done

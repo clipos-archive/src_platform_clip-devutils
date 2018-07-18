@@ -1,0 +1,52 @@
+#!/usr/bin/perl
+# SPDX-License-Identifier: LGPL-2.1-or-later
+# Copyright © 2007-2018 ANSSI. All Rights Reserved.
+#usage  cp-to-vm domain_virt file* remote-path
+# as usual remote-path must be a directory if there is more than
+# on file to transfert
+#
+#The VM must be instrumented with a serial port opened for login in
+#
+#BEGIN {push @INC,"modules"}
+use lib __FILE__=~s/(.*)\/.*?$/\1/r;
+use Term::ANSIColor qw/colored/;
+require MIME::Base64 or die 'Install libemail-mime-encodings-perl';
+require Sys::Guestfs or die 'Install libfilesys-virtual-perl';
+require Sys::Virt or die 'Install libsys-virt-perl';
+use clipvirt;
+#find the domain to reach
+my $connection=clipvirt->new();
+$SIG{'INT'} = sub {$connection->{console}->finish() if $connection->{console};
+			print "AAAAAAAAAAAAAH got killed"; exit(0);};
+$connection->get_console(shift);
+$connection->send_command("mount -o remount -o rw /\n");
+
+#port operationnal; do the transfert
+print "uploading to $ARGV[-1]\n";
+
+$connection->upload_files(@ARGV);
+
+#do the actual install operations
+$connection->send_command("exit\n");
+
+#serial port back in default operation
+$connection->{console}->finish();
+print "Bye\n";
+
+=pod
+
+=head1 NAME
+
+cp-to-vm
+
+=head1 SYNOPSIS
+
+  cp-to-vm C<file*> C<remote-path>
+
+=head1 DESCRIPTION
+
+This program uploads files from an host to a  virtual
+machines managed by C<libvirt>.
+
+=cut
+

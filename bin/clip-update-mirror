@@ -1,0 +1,79 @@
+#!/usr/bin/perl
+# SPDX-License-Identifier: LGPL-2.1-or-later
+# Copyright © 2007-2018 ANSSI. All Rights Reserved.
+
+#
+# clip-update-mirror - update a mirror on CLIP install media,
+# by injecting new packages on it, pruning it of old packages,
+# then updating Packages.gz
+# Copyright (C) 2013 SGDSN/ANSSI
+# Author: Vincent Strubel <clipos@ssi.gouv.fr>
+#
+# All rights reserved.
+#
+
+use strict;
+use warnings;
+
+use File::Copy;
+use File::Spec;
+use CLIP::Logger ':all';
+use CLIP::Pkg::Base ':all';
+use CLIP::Pkg::Download ':all';
+
+my $src = shift;
+my $dst = shift;
+my $dist = shift;
+my $arch = shift;
+
+my @pkgs = @ARGV;
+
+sub usage() {
+	print "Usage: clip-update-mirror <src> <dst> <distribution> <arch> <pkg1> <pkg2> ... <pkgn>\n";
+	print "E.g. : clip-update-mirror . /mnt/removable/mirrors/clip4-rm-dpkg/rm/rm-apps-conf \\\n";
+	print "                                                  rm i386 wesnoth_1.10.6_i386.deb\n";
+}
+
+unless ($src and $dst and $dist and $arch and $#pkgs >= 0) {
+	usage();
+	exit 1;
+}
+
+$src = File::Spec->rel2abs($src) 
+	unless (File::Spec->file_name_is_absolute($src));
+$dst = File::Spec->rel2abs($dst) 
+	unless (File::Spec->file_name_is_absolute($dst));
+
+my $pool = "$dst/pool";
+my $index = "$dst/dists/$dist/main/binary-$arch/Packages.gz";
+
+foreach my $pkg (@pkgs) {
+	unless (copy("$src/$pkg", "$pool/$pkg")) {
+		clip_warn "could not copy $src/$pkg to $pool";
+		exit 1;
+	}
+}
+
+unless (clippkg_prune($pool)) {
+	clip_warn "failed to prune the mirror at $pool";
+	exit 1;
+}
+
+# Needed so we get the correct relative paths
+unless (chdir($dst)) {
+	clip_warn "failed to chdir to $dst";
+	exit 1;
+}
+
+unless (clippkg_gen_packages_gz("pool", $index, "$index.new", \@pkgs, 1)) {
+	clip_warn "failed to create index $index";
+	exit 1;
+}
+
+unless (move("$index.new", $index)) {
+	clip_warn "failed to move $index.new to $index";
+	exit 1;
+}
+
+print "Mirror at $pool successfully updated.\n";
+

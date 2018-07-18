@@ -1,0 +1,136 @@
+#!/bin/sh
+# SPDX-License-Identifier: LGPL-2.1-or-later
+# Copyright © 2007-2018 ANSSI. All Rights Reserved.
+
+#
+#  clip-sign - sign packages
+#  Copyright (C) 2010-2012 SGDSN/ANSSI
+#  Authors:
+#    Vincent Strubel <clipos@ssi.gouv.fr>
+#    Mickaël Salaün <clipos@ssi.gouv.fr>
+#
+#  All rights reserved.
+#
+
+CONFFILE="/etc/clip-build.conf"
+
+usage() {
+	local progname="$(basename "${0}")"
+
+	cat <<EOF
+
+$progname: sign packages
+
+This utility uses key paths that it expects to find in ${CONFFILE}.
+
+Usage: $progname <action> <pkg1>.deb [<pkg2>.deb ... <pkgN>.deb]
+  with action one (and only one) of the following:
+    -d : only add a developper signature
+    -c : only add a controller signature
+    -a : add both signatures (developper + controller)
+    -r : replace existing signatures (if any)
+EOF
+}
+
+check_var() {
+	local var="${1}"
+	local val="$(eval echo \${${var}})"
+
+	if [[ -z "${val}" ]]; then
+		echo "Error: ${var} is undefined - define it in ${CONFFILE}" >&2
+		return 1
+	fi
+	return 0
+}
+
+error() {
+	echo "Error: ${1}" >&2
+	exit 1
+}
+
+check_sign() {
+	local p="${1}"
+	local n="${2}"
+
+	ar t "${p}" 1>/dev/null || error "${p} is not a valid package"
+	ar t "${p}" | grep -qE "^${n}\$" && error "${p} already has a ${n} signature"
+}
+
+######################### MAIN ################################
+
+if [[ -z "${1}" ]]; then
+	usage
+	echo "Error: No action specified" >&2
+	exit 1
+fi
+
+if ! source "${CONFFILE}"; then
+	echo "Failed to read ${CONFFILE}" >&2
+	exit 1
+fi
+
+while getopts acdrhn opt; do
+	case "${opt}" in
+		a)
+			DO_DEV="y"
+			DO_CTRL="y"
+			;;
+		c)
+			DO_CTRL="y"
+			;;
+		d)
+			DO_DEV="y"
+			;;
+		r)
+			DO_REPLACE="y"
+			;;
+		h)
+			usage
+			exit 0
+			;;
+		n)
+			usage
+			echo "Error: SIG1 signatures are not supported anymore." >&2
+			exit 1
+			;;
+		*)
+			usage
+			echo "Error: Unsupported action: ${opt}" >&2
+			exit 1
+			;;
+	esac
+done
+
+shift "$((OPTIND - 1))"
+
+TO_CHECK=""
+[[ "${DO_CTRL}" = "y" ]] && TO_CHECK+=" CTRL_SIGN_KEY CTRL_SIGN_PWD CTRL_SIGN_CERT"
+[[ "${DO_DEV}" = "y" ]] && TO_CHECK+=" DEV_SIGN_KEY DEV_SIGN_PWD DEV_SIGN_CERT"
+
+for var in ${TO_CHECK} ; do
+	check_var ${var} || exit 1
+done
+
+for p in "${@}"; do
+	pname="$(basename "${p}")"
+
+	[[ -f "${p}" ]] || error "No package ${p} found"
+
+	echo "Signing ${p}..."
+	if [[ -n "${DO_REPLACE}" ]]; then
+		ar d "${p}" "ctrl_sign" 2>/dev/null
+		ar d "${p}" "dev_sign" 2>/dev/null
+	fi
+	if [[ -n "${DO_DEV}" ]]; then
+		check_sign "${p}" "dev_sign"
+		sign -k "${DEV_SIGN_KEY}" -p "${DEV_SIGN_PWD}" -c "${DEV_SIGN_CERT}" -D "${p}" \
+			|| error "Failed to sign ${p} (dev_sign)"
+	fi
+	if [[ -n "${DO_CTRL}" ]]; then
+		check_sign "${p}" "ctrl_sign"
+		sign -k "${CTRL_SIGN_KEY}" \
+			-p "${CTRL_SIGN_PWD}" -c "${CTRL_SIGN_CERT}" \
+			-C "${p}" \
+			|| error "Failed to sign ${p} (ctrl_sign)"
+	fi
+done

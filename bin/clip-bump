@@ -1,0 +1,360 @@
+#!/usr/bin/perl
+# SPDX-License-Identifier: LGPL-2.1-or-later
+# Copyright © 2007-2018 ANSSI. All Rights Reserved.
+
+#
+#  clip-bump - bump an ebuild and update the changelog.
+#  Copyright (C) 2009 SGDN/DCSSI
+#  Copyright (C) 2010-2012 SGDSN/ANSSI
+#  Author: Vincent Strubel <clipos@ssi.gouv.fr>
+#
+#  All rights reserved.
+#
+
+use strict;
+use warnings;
+use File::Copy;
+use Getopt::Long;
+
+###############################################################################
+#                                  GLOBALS                                    #
+###############################################################################
+
+my $g_conffile = "/etc/clip-build.conf";
+
+## Regexps ##
+
+my $ebreg = '(\S+)-(\d+(?:\.\d+)*[[:alpha:]]?(?:(?:_alpha|_beta|_pre|_rc|_p)\d*)?\*?(?:-r\d+)?)';
+my $versreg = '(\d+(?:\.\d+)*[[:alpha:]]?)((?:(?:_alpha|_beta|_pre|_rc|_p)\d*)?\*?)((?:-r\d+)?)';
+
+## Options ##
+
+my $o_version_bump = 0;
+my $o_new_version = "";
+my $o_ebuild = "";
+my $o_msg = "";
+
+## Params ##
+my $g_maintainer = "";
+my $g_date = "Invalid";
+my $g_svn = 0;
+my $g_git = 0;
+
+## Hashes ##
+
+my %suf_values = (
+			"_alpha" 	=>	-4,
+			"_beta"		=>	-3,
+			"_pre"		=>	-2,
+			"_rc"		=>	-1,
+			"nosuf"		=>	0,
+			"_p"		=>	1,
+);
+
+my @months = qw( Jan Feb Mar Apr May Jun Jul Aug Sep Oct Nov Dec );
+
+## Protos ##
+
+sub find_latest_ebuild($$);
+sub bump_version($);
+sub get_conf();
+sub get_date();
+sub update_changelog($$$);
+
+sub usage($) {
+	my $out = shift;
+	my $progname = $0;
+	$progname =~ s:.*\/::;
+
+	print $out <<ENDHELP;
+
+$progname : bump a CLIP ebuild in the current directory and update its ChangeLog.
+
+The updated changelog file is either ClipChangeLog, if found in the current directory,
+or ChangeLog otherwise. Note that this utility only creates the skeleton for the new
+changelog entry - you still have to add some comments to it :)
+
+When bumping an ebuild, the old ebuild is automatically removed. If several ebuilds are
+present in the current directory, only the latest one (highest version) is bumped by default.
+If you need to bump another ebuild (with a lower version than the latest one), use the -e
+switch.
+
+By default, $progname creates a revision bump of the ebuild, i.e. :
+   version 1.0.1-r1 => 1.0.1-r2
+   version 1.0.1 => 1.0.1-r1
+Use the -n option for a full bump, i.e 1.0.1 => 1.0.2, or use -v for an explicit new version.
+
+This utility makes use of definitions it expects to find in $g_conffile : CLIP_BUILDER, USE_SVN.
+
+Usage: $progname [options]
+  with the following supported options:
+    -e <ebuild>  : bump <ebuild> (default: bump the ebuild with the highest version in the current dir)
+    -n           : perform a version bump (default: revision bump)
+    -m <msg>     : use <msg> as ChangeLog message.
+    -v <version> : bump to a new version of <version> (ex: "-v 2.0.0" to bump 1.0.3 => 2.0.0)
+
+ENDHELP
+}
+
+
+###############################################################################
+#                                      MAIN                                   #
+###############################################################################
+
+eval {
+	GetOptions (
+		'new'		=> \$o_version_bump,
+		'version=s'	=> \$o_new_version,
+		'ebuild=s'	=> \$o_ebuild,
+		'message=s'	=> \$o_msg,
+		'h'		=> sub {usage(*STDOUT{IO}); exit 0},
+	) or die 1;
+};
+die "Failed to parse command line" if ($@);
+
+my ($ebname, $curver, $newver);
+
+if ($o_ebuild) {
+	$o_ebuild =~ /^$ebreg.ebuild$/
+		or die "Unsupported ebuild name format $o_ebuild";
+	$ebname = $1;
+	$curver = $2;
+} else {
+	find_latest_ebuild(\$ebname, \$curver);
+}
+
+$newver = bump_version($curver);
+
+get_conf;
+get_date;
+
+my @cmd = ("mv", "$ebname-$curver.ebuild", "$ebname-$newver.ebuild");
+unshift(@cmd, "svn") if ($g_svn);
+unshift(@cmd, "git") if ($g_git);
+
+system(@cmd)
+	and die "Could not move $ebname-$curver.ebuild";
+
+if ( -f "files/digest-$ebname-$curver" ) {
+	@cmd = ("rm", "files/digest-$ebname-$curver");
+	unshift(@cmd, "svn") if ($g_svn);
+	unshift(@cmd, "git") if ($g_git);
+	system(@cmd) and print STDERR "Could not remove files/digest-$ebname-$curver\n";
+}
+
+print "New ebuild: $ebname-$newver.ebuild\n";
+
+update_changelog($ebname, $curver, $newver);
+
+
+###############################################################################
+#                                      SUBS                                   #
+###############################################################################
+
+## Protos ##
+sub parse_version($$$$);
+sub suffix_cmp($$);
+sub version_cmp($$);
+
+sub parse_version($$$$) {
+	my ($pv, $verref, $sufref, $revref) = @_;
+
+	if ($pv =~ /^$versreg$/) {
+		${$verref} = $1;
+		${$sufref} = $2;
+		${$revref} = $3;
+	} else {
+		die "Unrecognized version format : $pv";
+	}
+}
+
+sub suffix_cmp($$) {
+	my ($suf1, $suf2) = @_;
+	my ($name1, $name2) = map { s/\d*$//; $_ } @_;
+
+	my $name_diff = $suf_values{$name1} - $suf_values{$name2};
+	if ($name_diff) {
+		return ($name_diff > 0) ? 1 : -1;
+	}
+
+	my ($num1, $num2) = map { /\D*(\d+)$/ and $1 or 0 } ($suf1, $suf2); 
+
+	if ($num1 == $num2) {
+		return 0;
+	} else {
+		return ($num1 > $num2) ? 1 : -1;
+	}
+}
+
+sub version_cmp($$) {
+	my ($pv1, $pv2) = @_;
+
+	my ($ver1, $suf1, $rev1, $ver2, $suf2, $rev2);
+
+	parse_version($pv1, \$ver1, \$suf1, \$rev1);
+	parse_version($pv2, \$ver2, \$suf2, \$rev2);
+
+	$suf1 = "nosuf" if not ($suf1);
+	$suf2 = "nosuf" if not ($suf2);
+
+	if ($ver1 ne $ver2) {
+		return ($ver1 gt $ver2) ? 1 : -1;
+	}
+
+	if ($suf1 ne $suf2) {
+		my $ret = suffix_cmp($suf1, $suf2);
+		return $ret if ($ret);
+	}
+
+	my ($num1, $num2) = map { /\D*(\d+)$/; $1 } ($rev1, $rev2);
+	if ($num1 == $num2) {
+		return 0;
+	} else {
+		return ($num1 > $num2) ? 1 : -1;
+	}
+}
+
+sub find_latest_ebuild($$) {
+	my ($nameref, $verref) = @_;
+	my $latest_name="";
+	my $latest_ver="";
+	my ($name, $ver);
+
+	my @ebuilds = <*.ebuild>;
+
+SEARCHLOOP:
+	foreach my $ebuild (@ebuilds) {
+		$ebuild =~ s/.ebuild$//;
+		if ($ebuild =~ /^$ebreg$/) {
+			$name = $1;
+			$ver = $2;
+		} else {
+			die "Unrecognized name format: $ebuild";
+		}
+
+		if (not $latest_name) {
+			$latest_name = $name;
+			$latest_ver= $ver;
+			next SEARCHLOOP;
+		}
+
+		my $cmp = version_cmp($ver, $latest_ver);
+		die "Same version found twice. This should not happen"
+			if not ($cmp);
+
+		if ($cmp > 0) {
+			$latest_name = $name;
+			$latest_ver = $ver;
+		}
+	}
+
+	die "No ebuilds found ?" if not ($latest_name);
+
+	${$nameref} = $latest_name;
+	${$verref} = $latest_ver;
+}
+
+sub bump_version($) {
+	my $curver = shift;
+
+	return $o_new_version if ($o_new_version);
+
+	my ($ver, $suf, $rev);
+
+	parse_version($curver, \$ver, \$suf, \$rev);
+
+	die "I don't know what to do with suffix $suf, you'll have to tell me"
+		if ($o_version_bump and $suf);
+
+	if ($o_version_bump) {
+		$ver =~ /(?:\d+.)*(\d+)/
+			or die "Unsupported version format $ver";
+		my $last_num = $1;
+		$last_num++;
+		$ver =~ s/((?:\d+.)*)(\d+)/$1$last_num/
+			or die "What happen ?";
+		# No rev on new versions
+		return "$ver$suf";
+	}
+
+	# Rev bump
+	if (not $rev) {
+		return "$ver$suf-r1";
+	}
+
+	$rev =~ /-r(\d+)/
+		or die "Unsupported revision format $rev";
+	my $revnum = $1;
+	$revnum++;
+	return "$ver$suf-r$revnum";
+}
+
+sub get_conf() {
+	open IN, "<", $g_conffile or die "Failed to open $g_conffile";
+
+LOOP:
+	while (<IN>) {
+		if (/^CLIP_BUILDER="([^"]+)"/) {
+			$g_maintainer = $1;
+		}
+		if (/^USE_SVN="?([^"]+)"?/) {
+			my $svn = $1;
+			$svn = uc $svn;
+			$g_svn = 1 if ($svn eq "Y" or $svn eq "YES");
+		}
+		if (/^USE_GIT="?([^"]+)"?/) {
+			my $git = $1;
+			$git = uc $git;
+			$g_git = 1 if ($git eq "Y" or $git eq "YES");
+		}
+	}
+	if ($g_git and $g_svn) {
+		die "USE_SVN and USE_GIT can not be set at the same time";
+	}
+
+	die "Could not extract developper name / email from $g_conffile"
+		unless ($g_maintainer);
+}
+
+sub get_date() {
+	my ($sec,$min,$hour,$mday,$mon,$year,$wday,$yday,$isdst) = localtime(time);
+
+	$year+=1900;
+
+	$mday = "0$mday" if ($mday < 10);
+
+	$g_date = "$mday $months[$mon] $year";
+}
+
+sub update_changelog($$$) {
+	my ($ebname, $oldver, $newver) = @_;
+
+	my $filename = (-f "ClipChangeLog") ? "ClipChangeLog" :  "ChangeLog";
+
+	open IN, "<", "$filename" or die "Cannot read $filename";
+	# weeeheee
+	my @lines = <IN>;
+	close IN;
+
+	open OUT, ">", "$filename" or die "Cannot write to $filename";
+	my $inserted = 0;
+	foreach my $line (@lines) {
+		if (not $inserted and not $line =~ /^#/) {
+			print OUT <<ENDENTRY;
+
+*$ebname-$newver ($g_date)
+
+  $g_date; $g_maintainer
+  +$ebname-$newver.ebuild, -$ebname-$oldver.ebuild:
+ENDENTRY
+			print OUT "$o_msg\n" if ($o_msg);
+			$inserted++;
+			print OUT $line;
+		} else {
+			print OUT $line;
+		}
+	}
+	close OUT;
+	print "$filename updated\n";
+}
+

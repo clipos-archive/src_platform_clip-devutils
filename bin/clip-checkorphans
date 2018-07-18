@@ -1,0 +1,152 @@
+#!/usr/bin/perl
+# SPDX-License-Identifier: LGPL-2.1-or-later
+# Copyright © 2007-2018 ANSSI. All Rights Reserved.
+
+#
+#  clip-checkorphans - list packages referenced by 
+#  a config which are not referenced by any other package
+#  in that config
+#  Copyright (C) 2013 SGDSN/ANSSI
+#  Author: Vincent Strubel <clipos@ssi.gouv.fr>
+#
+#  All rights reserved.
+#
+
+use strict;
+use warnings;
+use Getopt::Long;
+use CLIP::Logger ':all';
+use CLIP::Pkg::QA ':all';
+
+
+sub usage($) {
+	my $out = shift;
+	my $progname = $0;
+	$progname =~ s:.*\/::;
+	
+	print $out <<ENDHELP;
+	
+$progname : list packages referenced by a configuration which 
+are not referenced by any other package in the configuration.
+These packages are not necessarily to be removed from the configuration,
+but they might be if you yourself have no idea why you might need them.
+
+Usage: $progname [options] <config>.deb
+  with the following supported options: 
+    -a : also display reference counts for all packages
+
+ENDHELP
+}
+
+sub is_optional($) {
+	my $pkg = shift; # full path
+
+	open PIPE, "dpkg -f $pkg Description-fr |";
+	my @output = <PIPE>;
+	close PIPE;
+	if ($?) {
+		clip_warn "failed to read Description-fr on $pkg";
+		return 0;
+	}
+	return 1 if ($output[0]); 
+	return 0;
+}
+
+######################### MAIN ################################
+
+$g_log_prefix = "clip-checkorphans";
+$g_log_syslog = 0;
+$g_log_debug = 0;
+
+my $g_display_all = 0;
+
+eval {
+	GetOptions (
+		'all'		=> 	\$g_display_all,
+		'help'		=>	sub {usage(*STDOUT{IO}); exit 0},
+	) or die 1;
+};
+
+if ($@) {
+	usage(*STDERR{IO});
+	die "Wrong options, aborting";
+}
+
+
+my $conf = $ARGV[0];
+die "Usage: $g_log_prefix <config>.deb\n" unless (defined($conf));
+my $arch;
+if ($conf =~ /_([^_]+)\.deb$/) {
+	$arch = $1;
+} else {
+	die "cannot extract arch from config name: ".(basename $conf)."\n";
+}
+
+my %basehash = ();
+my %depcounts = ();
+die "failed to get dep hash" unless clippkg_get_strict_deps_full($conf, $arch, \%basehash);
+
+DEPLOOP:
+foreach my $dep (keys %basehash) {
+	my $pkg = $basehash{$dep}->[1]; # Full path
+
+	$depcounts{$dep} += 1;
+
+	unless (-f $pkg) {
+		clip_warn "dependency $pkg missing.";
+		next DEPLOOP;
+	}
+
+	my @innerdeps = ();
+	unless (clippkg_get_fuzzy_deplist($pkg, 'Depends', \@innerdeps)) {
+		clip_warn "failed to get dependencies for $pkg.";
+		next DEPLOOP;
+	}
+
+	foreach my $hashref (@innerdeps) {
+		foreach my $innerdep (keys %{$hashref}) {
+			$depcounts{$innerdep} += 1;
+		}
+	}
+}
+
+my @orphans = ();
+
+LOOP:
+foreach my $pkg (sort keys %depcounts) {
+	next LOOP if ($depcounts{$pkg} != 1);
+
+	# exclude packages not referenced by the conf - they must be virtuals,
+	# assuming the conf passes clip-checkconfig -f
+	next LOOP unless (defined($basehash{$pkg}));
+	my $pfull = $basehash{$pkg}->[1]; # full path
+
+	# exclude optional packages with a Description-fr
+	next if (is_optional($pfull));
+
+	my %prov = ();
+
+	# exclude packages which provide a virtual which is itself
+	# referenced at least once
+	unless (clippkg_get_fuzzy_deps($pfull, 'Provides', \%prov)) {	
+		clip_warn "failed to get provided packages for $pfull";
+		next LOOP;
+	}
+	foreach my $provided (keys %prov) {
+		next LOOP if (defined($depcounts{$provided}));
+	}
+
+	push @orphans, ($pkg);
+}
+
+print "Possibly orphan packages (not referenced by any other package):\n";
+foreach my $pkg (@orphans) {
+	print "    $pkg\n";
+}
+
+if ($g_display_all) {
+	print "All dependency counts:\n";
+	foreach my $pkg (sort keys %depcounts) {
+		print "    $pkg => $depcounts{$pkg}\n";
+	}
+}

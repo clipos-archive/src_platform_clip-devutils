@@ -1,0 +1,49 @@
+#!/bin/bash
+# SPDX-License-Identifier: LGPL-2.1-or-later
+# Copyright © 2007-2018 ANSSI. All Rights Reserved.
+#
+# clip-getdistfile - Generate a distfile from a tagged project
+# Copyright (C) 2017 ANSSI
+# Author: Mickaël Salaün <clipos@ssi.gouv.fr>
+# All rights reserved.
+#
+# Workflow to create a clean distfile from a working directory:
+# - work on the source then "svn add" all the needed files
+# - call clip-mkdistfile 1.0.0
+# - bump the ebuild, update the manifest and test
+# - when everything is OK, commit the clip-dev project and commit a Subversion
+#   tag as well
+# - call clip-getdistfile [-d] foo 1.0.0 (underneath call clip-mkdistfile on
+#   the Subversion tag)
+# - update the manifest and commit the portage tree. You may need to remove the
+#   old line in Manifest to avoid emerge to failed, but clip-mkdistfile will do
+#   the job if you are in the ebuild's directory.
+#
+# TODO: enhance clip-fetch to automatically call clip-getdistfile if needed
+#       (must infer if it is in the distfiles or distfiles-dev directory)
+
+set -e -o pipefail
+
+MYSELF="$(basename -- "$0")"
+usage() {
+	echo "usage: ${MYSELF} [-d] <pkg-name>-<pkg-version>[.tar.xz]" >&2
+}
+
+DEV_MODE=""
+if [ "$1" = "-d" ]; then
+	shift
+	DEV_MODE="-d"
+fi
+
+PKG_FULL="${1%%.tar.xz}"
+
+PKG_INFOS=($(echo "${PKG_FULL}" | sed -e 's/^\(.\+\)-\([0-9.]\+\(-r[0-9]\+\)\?\)$/\1 \2/'))
+PKG_NAME="${PKG_INFOS[0]}"
+PKG_VERSION="${PKG_INFOS[1]}"
+
+if [ $# -gt 1 -o -z "${PKG_NAME}" -o -z "${PKG_VERSION}" ]; then
+	usage
+	exit 1
+fi
+
+exec clip-mkdistfile ${DEV_MODE} "${PKG_VERSION}" "https://clip.ssi.gouv.fr/clip-dev/${PKG_NAME}/tags/${PKG_FULL}"

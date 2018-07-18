@@ -1,0 +1,183 @@
+#!/bin/bash
+# SPDX-License-Identifier: LGPL-2.1-or-later
+# Copyright © 2007-2018 ANSSI. All Rights Reserved.
+# clip-prepare-mirrors - Clip mirrors builder
+# Copyright (C) 2015 ANSSI
+# Author: Piotr Chmielnicki <clipos@ssi.gouv.fr>
+# All rights reserved
+
+set -e
+
+# Dependencies check
+for f in '/opt/clip-livecd/get-mirrors.sh' '/lib/rc/sh/functions.sh'
+do
+    if [ ! -f "$f" ]
+    then
+        echo "Fatal error: dependency ${f} not fount."
+    fi
+done
+
+. "/lib/rc/sh/functions.sh"
+
+# Usage
+function usage {
+    ME=$(basename -- "${0}")
+    echo "Usage:" >&2
+    echo "  ${ME} [ -a ] [ -export ] [ -cache PATH | -noccsd ] {{ -rm | -gtw | -bare } PATH }[...] -target PATH" >&2
+    echo "  ex: ${ME} -rm ~/clip4-rm-dpkg/ -gtw ~/clip4-gtw-dpkg/ -target ~/installer/mirrors/" >&2
+    echo "  [ -a ] : trigger missing deb package compilation" >&2
+    exit 1
+}
+
+# Args parsing
+if [ "$#" -eq 0 ]
+then
+    usage
+fi
+while [ "$#" -gt 0 ]
+do
+    case "$1" in
+    -export)
+        EXPORT='-export'
+        ;;
+    -cache)
+        CACHE="$2"
+        shift
+        ;;
+    -noccsd)
+        NOCCSD='y'
+        ;;
+    -rm)
+        RM_DPKG="$2"
+        shift
+        ;;
+    -gtw)
+        GTW_DPKG="$2"
+        shift
+        ;;
+    -bare)
+        BARE_DPKG="$2"
+        shift
+        ;;
+    -target)
+        TARGET="$2"
+        shift
+        ;;
+    -a)
+    	DO_COMPILE="-a"
+	;;
+    -h|--help|-help)
+	echo debug1
+	usage
+        ;;
+    *)
+        eerror "Fatal error: ${1} invalid argument."
+        usage
+        ;;
+    esac
+    shift
+done
+
+# Check for invalid arguments
+if [ -z "$TARGET" ]
+then
+    eerror "Fatal error: no -target is mandatory."
+    usage
+fi
+if [ -n "$CACHE" ] && [ -n "$NOCCSD" ]
+then
+    eerror "Fatal error: -cache and -noccsd option are incompatble." 
+    usage
+fi
+if [ -z "$RM_DPKG" ] && [ -z "$GTW_DPKG" ] && [ -z "$BARE_DPKG" ]
+then
+    ewarn "Nothing to do"
+    usage
+fi
+# Check that provided directories are correct
+for dir in "$CACHE" "$RM_DPKG" "$GTW_DPKG" "$BARE_DPKG"
+do
+    if [ -n "$dir" ] && [ ! -d "$dir" ]
+    then
+        eerror "Fatal error ${dir}: no such directory."
+    fi
+done
+if [ -n "$BARE_DPKG" ]
+then
+    if [ -n "$CACHE"] || [ -n "$NOCCSD" ]
+    then
+        ewarn "Warning: -cache and -noccsd dosen't affect bare repository."
+    fi
+fi
+
+# Find *-conf*.deb
+if [ -d "$RM_DPKG" ]
+then
+    RM_CLIP_CORE=$(find "${RM_DPKG}/clip${EXPORT}" "${CACHE}/clip${EXPORT}" -name 'clip-core-conf*' | sort | tail -n 1 | grep -o 'clip-core-conf.*')
+    einfo "rm clip core: $RM_CLIP_CORE"
+    RM_CLIP_APPS=$(find "${RM_DPKG}/clip${EXPORT}" "${CACHE}/clip${EXPORT}" -name 'clip-apps-conf*' | sort | tail -n 1 | grep -o 'clip-apps-conf.*')
+    einfo "rm clip apps: $RM_CLIP_APPS"
+    RM_RM_CORE=$(find "${RM_DPKG}/rm${EXPORT}" "${CACHE}/rm${EXPORT}" -name 'rm-core-conf*' | sort | tail -n 1 | grep -o 'rm-core-conf.*')
+    einfo "rm rm core: $RM_RM_CORE"
+    RM_RM_APPS=$(find "${RM_DPKG}/rm${EXPORT}" "${CACHE}/rm${EXPORT}" -name 'rm-apps-conf*' | sort | tail -n 1 | grep -o 'rm-apps-conf.*')
+    einfo "rm rm apps: $RM_RM_APPS"
+fi
+if [ -d "$GTW_DPKG" ]
+then
+    GTW_CLIP_CORE=$(find "${GTW_DPKG}/clip${EXPORT}" "${CACHE}/clip${EXPORT}" -name 'clip-core-conf*' | sort | tail -n 1 | grep -o 'clip-core-conf.*')
+    einfo "gtw clip core: $GTW_CLIP_CORE"
+    GTW_CLIP_APPS=$(find "${GTW_DPKG}/clip${EXPORT}" "${CACHE}/clip${EXPORT}" -name 'clip-apps-conf*' | sort | tail -n 1 | grep -o 'clip-apps-conf.*')
+    einfo "gtw clip apps $GTW_CLIP_APPS"
+fi
+if [ -d "$BARE_DPKG" ]
+then
+    BARE_CLIP_CORE=$(find "${BARE_DPKG}/bare${EXPORT}" "${CACHE}/bare${EXPORT}" -name 'clip-core-conf*' | sort | tail -n 1 | grep -o 'clip-core-conf.*')
+    einfo "bare clip core: $BARE_CLIP_CORE"
+    BARE_CLIP_APPS=$(find "${BARE_DPKG}/bare${EXPORT}" "${CACHE}/bare${EXPORT}" -name 'clip-apps-conf*' | sort | tail -n 1 | grep -o 'clip-apps-conf.*')
+    einfo "bare clip apps: $BARE_CLIP_APPS"
+fi
+
+# Set up cache
+if [ -d "$CACHE" ]
+then
+    RM_CLIP_CACHE="-c ${CACHE}/clip"
+    RM_RM_CACHE="-c ${CACHE}/rm"
+    GTW_CLIP_CACHE="-c ${CACHE}/gtw"
+elif [ -n "$NOCCSD" ]
+then
+    RM_CLIP_CACHE="-c ${RM_DPKG}/clip-noccsd"
+    RM_RM_CACHE="-c ${RM_DPKG}/clip-noccsd"
+    GTW_CLIP_CACHE="-c ${GTW_DPKG}/clip-noccsd"
+else
+    RM_CLIP_CACHE=""
+    RM_RM_CACHE=""
+    GTW_CLIP_CACHE=""
+fi
+
+# Preparing target
+einfo "cleaning ${TARGET}"
+rm -rf "${TARGET}"
+
+# Building mirrors
+if [ -d "$RM_DPKG" ]
+then
+    mkdir -p "${TARGET}/clip4-rm-dpkg"
+    /opt/clip-livecd/get-mirrors.sh ${DO_COMPILE} -p "${RM_DPKG}/clip${EXPORT}" -R "${TARGET}/clip4-rm-dpkg" -d "${RM_CLIP_CORE}" -D clip $RM_CLIP_CACHE
+    /opt/clip-livecd/get-mirrors.sh ${DO_COMPILE} -p "${RM_DPKG}/clip${EXPORT}" -R "${TARGET}/clip4-rm-dpkg" -d "${RM_CLIP_APPS}" -D clip $RM_CLIP_CACHE
+
+    /opt/clip-livecd/get-mirrors.sh ${DO_COMPILE} -p "${RM_DPKG}/rm${EXPORT}" -R "${TARGET}/clip4-rm-dpkg" -d "${RM_RM_CORE}" -D rm $RM_RM_CACHE
+    /opt/clip-livecd/get-mirrors.sh ${DO_COMPILE} -p "${RM_DPKG}/rm${EXPORT}" -R "${TARGET}/clip4-rm-dpkg" -d "${RM_RM_APPS}" -D rm $RM_RM_CACHE
+fi
+if [ -d "$GTW_DPKG" ]
+then
+    mkdir -p "${TARGET}/clip4-rm-dpkg"
+    /opt/clip-livecd/get-mirrors.sh ${DO_COMPILE} -p "${GTW_DPKG}/clip${EXPORT}" -R "${TARGET}/clip4-gtw-dpkg" -d "${GTW_CLIP_CORE}" -D clip $GTW_CLIP_CACHE
+    /opt/clip-livecd/get-mirrors.sh ${DO_COMPILE} -p "${GTW_DPKG}/clip${EXPORT}" -R "${TARGET}/clip4-gtw-dpkg" -d "${GTW_CLIP_APPS}" -D clip $GTW_CLIP_CACHE
+fi
+if [ -d "$BARE_DPKG" ]
+then
+    mkdir -p "${TARGET}/clip4-bare-dpkg"
+    /opt/clip-livecd/get-mirrors.sh ${DO_COMPILE} -p "${BARE_DPKG}" -R "${TARGET}/clip4-bare-dpkg" -d "${BARE_CLIP_CORE}" -D clip
+    /opt/clip-livecd/get-mirrors.sh ${DO_COMPILE} -p "${BARE_DPKG}" -R "${TARGET}/clip4-bare-dpkg" -d "${BARE_CLIP_APPS}" -D clip
+fi
+einfo "Success: mirror(s) building done."

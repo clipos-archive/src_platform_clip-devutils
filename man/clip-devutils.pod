@@ -1,0 +1,141 @@
+=pod
+
+=encoding UTF-8
+
+=head1 NAME
+
+I<clip-devutils> - clip-developpment utilities.
+
+=head1 DESCRIPTION
+
+The clip-devutils package installs a number of small utility
+scripts tailored to the CLIP development process. This manpage
+simply lists the available commands - for further information,
+the reader should refer to each commands's inline help, by
+running B<command> -h.
+
+=head1 COMMANDS
+
+=head3 Source management utilities
+
+=over 20
+
+=item B<clip-bump>
+
+Bump an ebuild to a new version, and update the corresponding
+changelog file.
+
+=item B<clip-changes>
+
+Displays a summary of changes between two Clip versions by parsing the Clip
+conf packages' ChangeLogs.
+
+=item B<clip-patch-split>
+
+Split a patch into several patches, one per affected file.
+
+=item B<clip-vcs>
+
+Usefull to backport some parts of a portage tree and distfiles.
+Get current Clip main packages versions, and display ebuilds ChangeLog updates.
+
+=back
+
+=head3 Build utilities
+
+=over 20
+
+=item B<clip-cpdistfile>
+
+Cleanly copy files and create symlinks in the distfiles or distfiles-dev
+directory.
+
+=item B<clip-mkdistfile>
+
+Cleanly create a distfile tarball.
+
+=item B<clip-getdistfile>
+
+Generate the distfile from the project's repository.
+
+=item B<clip-make>
+
+Helper to clean, build, sign and sync packages (if needed) according to a
+custom list.
+
+=back
+
+=head3 Binary package utilities
+
+=over 20
+
+=item B<clip-checkconfig>
+
+Check the dependencies of a configuration package.
+
+=item B<clip-cleanconfigs>
+
+Remove the packages that are no longer referenced by one or several
+configurations.
+
+=item B<clip-dpkg>
+
+Print or check Clip package use flags.
+
+=item B<clip-prunepkgs>
+
+Remove packages that are obsoleted by newer versions.
+
+=back
+
+=head3 Signature utilities
+
+=over 20
+
+=item B<clip-checksign>
+
+List packages that don't include signatures.
+
+=item B<clip-sign>
+
+Sign packages.
+
+=back
+
+=head3 Bootstrap utilities
+
+=over 20
+
+=item B<clip-installer-bootstrap>
+
+Builds a CLIP livecd SquashFS (in /opt/clip-installer/squashfs-root) suitable
+for building an installation medium.
+
+=item B<clip-sdk-bootstrap>
+
+Builds a new, clean CLIP SDK rootfs (in /opt/clip-sdk/rootfs).
+
+=back
+
+
+=head1 FILES
+
+Several utilities need local configuration items, which are read from a
+single file, F</etc/clip-build.conf>. An initial version of that file
+should have been installed by the I<clip-build> package.
+
+F</usr/share/clip-devutils/tools/> - Miscellaneous scripts for a devstation or a debug Clip machine.
+
+F</usr/share/clip-devutils/lxc/> - Clip SDK configuration for LXC.
+
+=head1 AUTHOR
+
+Yves-Alexis Perez <L<clipos@ssi.gouv.fr>>, Vincent Strubel
+<L<clipos@ssi.gouv.fr>> and Mickaël Salaün
+<L<clipos@ssi.gouv.fr>>
+
+=head1 SEE ALSO
+
+L<clip-build(7)|clip-build>
+
+=cut

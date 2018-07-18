@@ -1,0 +1,360 @@
+#!/usr/bin/env python2
+# -*- encoding: utf-8 -*-
+# SPDX-License-Identifier: LGPL-2.1-or-later
+# Copyright © 2007-2018 ANSSI. All Rights Reserved.
+
+# clip-changes - Display Clip ChangeLogs elegantly
+# Copyright (C) 2014 ANSSI
+# Author: Hugo Chargois <clipos@ssi.gouv.fr>
+# All rights reserved
+
+import argparse
+from datetime import datetime
+import os, sys
+import re
+import locale
+from collections import OrderedDict
+from itertools import groupby
+from gentoolkit.query import Query
+from gentoolkit.helpers import ChangeLog
+
+# required for parsing dates...
+locale.setlocale(locale.LC_ALL, 'en_US.UTF-8')
+
+CONFALIASES = {
+    'cc': 'clip-core-conf',
+    'ca': 'clip-apps-conf',
+    'rc': 'rm-core-conf',
+    'ra': 'rm-apps-conf',
+    'clip-core-conf': 'cc',
+    'clip-apps-conf': 'ca',
+    'rm-core-conf': 'rc',
+    'rm-apps-conf': 'ra',
+}
+
+class Colored(object):
+    RED = "\033[1;31m"
+    GREEN = "\033[1;32m"
+    YELLOW = "\033[1;33m"
+    BLUE = "\033[1;34m"
+    RESET = "\033[0m"
+
+    activated = True
+
+    @classmethod
+    def _colored(cls, color, txt):
+        if cls.activated:
+            return color + txt + cls.RESET
+        else:
+            return txt
+
+    @classmethod
+    def red(cls, txt):
+        return cls._colored(cls.RED, txt)
+
+    @classmethod
+    def green(cls, txt):
+        return cls._colored(cls.GREEN, txt)
+
+    @classmethod
+    def yellow(cls, txt):
+        return cls._colored(cls.YELLOW, txt)
+
+    @classmethod
+    def blue(cls, txt):
+        return cls._colored(cls.BLUE, txt)
+
+Colored.activated = True
+
+def parse_version(v):
+    result = OrderedDict()
+    virtual_version = 0
+    if not v:
+        return result
+    v = v.split('-', 1)
+    if len(v) == 1:
+        raise ValueError("Version has wrong format, see usage.")
+    ver, revisions = v
+    revisions = revisions.split('-')
+    for rev in revisions:
+        confalias = rev[:2]
+        confrev = rev[2:]
+        try:
+            confname = CONFALIASES[confalias]
+            virtual_version += int(confrev)
+        except (KeyError, ValueError):
+            raise ValueError("Version has wrong format, see usage.")
+        if confrev in ['0', '']:
+            result[confname] = ver
+        else:
+            result[confname] = ver + '-r' + confrev
+    if len(result) == 4:
+        virtual_version = "{}-v{}".format(ver, virtual_version)
+    else:
+        virtual_version = None
+    result["virtual"] = virtual_version
+    return result
+
+def prepare_comparisons(o, n):
+    print Colored.blue("Comparing:")
+    comparisons = []
+    for package, old_ver in o.items():
+        if old_ver is None:
+            continue
+        try:
+            new_ver = n[package]
+        except KeyError:
+            new_ver = None
+        new_ver_str = new_ver if new_ver else "last"
+        print "  {package:<15}: {old_ver:<10} -> {new_ver}".format(
+            package=package, old_ver=old_ver, new_ver=new_ver_str)
+        if package == "virtual":
+            continue
+        comparisons.append((package, old_ver, new_ver))
+    return comparisons
+
+
+class ChangeLogEntry(object):
+    class ParseException(Exception):
+        pass
+
+    def __init__(self, entry, pkgname, parse=True):
+        self.pkgname = pkgname
+        self.raw_entry = entry
+        if parse:
+            self.parsed_entry = {
+                "version": None,
+                "date": None,
+                "changeblocks": [],
+            }
+            self._parse(entry)
+        else:
+            self.parsed_entry = None
+
+    def __str__(self):
+        return str(self.parsed_entry)
+
+    def __repr__(self):
+        return self.__str__()
+
+    def _step_version(self, lines):
+        line = lines[0]
+        pattern = r"\*{pkgname}-([^ ]*) \((.*)\)".format(pkgname=self.pkgname)
+        match = re.match(pattern, line)
+        if not match:
+            raise self.ParseException(
+                "{}: Malformed ChangeLog entry: {}".format(self.pkgname, line))
+        version, date = match.groups()
+        self.parsed_entry["version"] = version
+        try:
+            date = datetime.strptime(date, "%d %b %Y").date()
+        except ValueError:
+            raise self.ParseException(
+                "{}: Malformed date: ".format(self.pkgname, date))
+        self.parsed_entry["date"] = date
+        return self._step_blank, lines[1:]
+
+    def _step_blank(self, lines):
+        while lines:
+            line = lines[0]
+            if line.strip():
+                new_changeblock = {
+                    "author": {
+                        "date": None,
+                        "name": None,
+                        "email": None,
+                    },
+                    "files": [],
+                    "comment": [],
+                }
+                self.parsed_entry["changeblocks"].append(new_changeblock)
+                return self._step_author, lines
+            else:
+                lines = lines[1:]
+        return None, []
+
+    def _step_author(self, lines):
+        line = lines[0]
+        pattern = r"\s*(.*);\s*(.*?)\s*<(.*)>"
+        match = re.match(pattern, line)
+        if not match:
+            raise self.ParseException(
+                "{}: Malformed ChangeLog author line: {}".format(self.pkgname, line))
+        date, name, email = match.groups()
+        try:
+            date = datetime.strptime(date, "%d %b %Y").date()
+        except ValueError:
+            raise self.ParseException(
+                "{}: Malformed date: {}".format(self.pkgname, date))
+        self.parsed_entry["changeblocks"][-1]["author"]["date"] = date
+        self.parsed_entry["changeblocks"][-1]["author"]["name"] = name
+        self.parsed_entry["changeblocks"][-1]["author"]["email"] = email
+        return self._step_files, lines[1:]
+        
+    def _step_files(self, lines):
+        while lines:
+            line = lines[0]
+            lines = lines[1:]
+            files = filter(bool, re.split(r",|[ ]|:$", line))
+            self.parsed_entry["changeblocks"][-1]["files"] += files
+            if line.endswith(":"):
+                return self._step_comment, lines
+        raise self.ParseException(
+            "{}: No comments for change, malformed ChangeLog?".format(self.pkgname))
+
+    def _step_comment(self, lines):
+        while lines:
+            line = lines[0]
+            if not line.strip():
+                return self._step_blank, lines
+            self.parsed_entry["changeblocks"][-1]["comment"] += [line.strip()]
+            lines = lines[1:]
+        return None, []
+
+    def _parse(self, entry):
+        lines = entry.split('\n')
+        step = self._step_version
+        while lines:
+            step, lines = step(lines)
+
+def get_changelog(package, from_ver, to_ver=None, raw=False):
+    # "inspired" by gentoolkit.equery.changes module
+    query = Query(package)
+    match = query.find_best()
+    if not match:
+        raise Exception("Unable to find {} package".format(package))
+    changelog_path = os.path.join(match.package_path(), "ChangeLog")
+    changelog = ChangeLog(changelog_path)
+    entries = changelog.entries_matching_range(from_ver=from_ver, to_ver=to_ver)
+    entries = entries[:-1] # last entry is "from" version which should not be displayed
+    result = {
+        "package": package,
+        "parsed_ok": not raw,
+        "entries": [],
+    }
+    for entry in entries:
+        try:
+            cle = ChangeLogEntry(entry, package, parse=(not raw))
+            result["entries"].append(cle)
+        except ChangeLogEntry.ParseException as e:
+            result["parsed_ok"] = False
+            print Colored.red("Error while parsing ChangeLog entry ({})".format(e))
+    return result
+
+def print_raw_changelog(changelog):
+    for pkg, cl in changelog.items():
+        print Colored.blue(" {:=^78} ".format(" "+pkg+" ")).encode("utf-8")
+        print
+        for entry in cl["entries"]:
+            print entry.raw_entry.encode("utf-8")
+
+def _print_short_entry(entry):
+    authors = ', '.join(set(map(lambda el: el["author"]["name"], entry["changeblocks"])))
+    print u" * {}, {}: {}".format(
+        Colored.red(entry["version"]),
+        Colored.green(str(entry["date"])),
+        Colored.yellow(authors)).encode("utf-8")
+    for c in entry["changeblocks"]:
+        for com in c["comment"]:
+            print u" {}".format(com).encode("utf-8")
+    print
+
+def print_short_changelog(changelog):
+    for pkg, cl in changelog.items():
+        print Colored.blue(" {:=^78} ".format(" "+pkg+" ")).encode("utf-8")
+        print
+        for entry in cl["entries"]:
+            _print_short_entry(entry.parsed_entry)
+
+def print_aggregate_changelog(changelog):
+    entries = []
+    for cl in changelog.values():
+        for entry in [e.parsed_entry for e in cl["entries"]]:
+            for block in entry["changeblocks"]:
+                new_entry = {
+                    "package": CONFALIASES[cl["package"]],
+                    "date": entry["date"],
+                    "author": block["author"]["name"],
+                    "comment": block["comment"],
+                }
+                entries.append(new_entry)
+
+    entries.sort(key=(lambda el: el["date"]), reverse=True)
+    for date, blocks in groupby(entries, key=(lambda el: el["date"])):
+        print Colored.green(str(date))
+        blocks = list(blocks)
+        blocks.sort(key=(lambda el: el["author"]))
+        for author, blocks2 in groupby(blocks, key=(lambda el:el["author"])):
+            print Colored.yellow(u"  {}".format(author)).encode("utf-8")
+            for b in blocks2:
+                intro = Colored.blue(b["package"]) + ":"
+                for line in b["comment"]:
+                    print u"    {} {}".format(intro, line).encode("utf-8")
+                    intro = "   "
+
+def main():
+    parser = argparse.ArgumentParser(
+        formatter_class=argparse.RawDescriptionHelpFormatter,
+        description="Display the ChangeLogs between versions of CLIP",
+        epilog="version format:\n"
+        "    '<version>[-<confalias><rev>]*'\n"
+        "  where confalias is one of:\n"
+        "    'cc' for clip-core-conf\n"
+        "    'ca' for clip-apps-conf\n"
+        "    'rc' for rm-core-conf\n"
+        "    'ra' for rm-apps-conf\n"
+        "  examples:\n"
+        "    '4.4.0-cc10' means:\n"
+        "       clip-core-conf-4.4.0-r10\n"
+        "    '4.4.0-cc10-ca20-rc30-ra40' means:\n"
+        "       clip-core-conf-4.4.0-r10\n"
+        "       clip-apps-conf-4.4.0-r20\n"
+        "       rm-core-conf-4.4.0-r30\n"
+        "       rm-apps-conf-4.4.0-r40\n"
+    )
+    parser.add_argument("old", help="the oldest of the two versions to compare")
+    parser.add_argument("new", nargs="?",
+                        help="the newest of the two versions to compare"
+                        " (default: last version)")
+    parser.add_argument("-m", "--mode", choices=["aggregate", "short", "raw"],
+                        default="aggregate",
+                        help=("display mode. 'aggregate' (default) shows the "
+                              "entries ordered by date and grouped by author, "
+                              "'short' shows the most important information "
+                              "of the ChangeLog in the same order but in a "
+                              "more concise form, 'raw' shows the raw "
+                              "ChangeLog entries"))
+    parser.add_argument("-c", "--color", choices=["auto", "always", "never"],
+                        default="auto",
+                        help=("display with colors or not. 'auto' (default) "
+                              "will display with colors if and only if stdout "
+                              "is connected to a terminal")
+                       )
+    args = parser.parse_args()
+
+    if (args.color == "never" 
+        or (args.color == "auto" and not sys.stdout.isatty())):
+        Colored.activated = False
+
+    old = parse_version(args.old)
+    new = parse_version(args.new)
+    comparisons = prepare_comparisons(old, new)
+    changelog = OrderedDict()
+    for package, old_ver, new_ver in comparisons:
+        changelog[package] = get_changelog(package, old_ver, new_ver,
+                                           raw=(args.mode == "raw"))
+    print
+    {"raw": print_raw_changelog,
+     "short": print_short_changelog,
+     "aggregate": print_aggregate_changelog,
+    }[args.mode](changelog)
+
+    if (not args.mode == "raw"
+        and not all([cl["parsed_ok"] for cl in changelog.values()])):
+        print Colored.red("There were errors while parsing ChangeLog entries. "
+                          "The output above is not complete.\nPlease use "
+                          "'--mode raw' to display raw entries without parsing.")
+
+
+if __name__ == "__main__":
+    main()

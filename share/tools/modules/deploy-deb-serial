@@ -1,0 +1,104 @@
+#!/usr/bin/perl
+# SPDX-License-Identifier: LGPL-2.1-or-later
+# Copyright © 2007-2018 ANSSI. All Rights Reserved.
+#usage  deploy-deb-serial cage domain_virt deb*
+#       the order does not really import :-)
+#
+#The VM must be instrumented with a serial port opened for login in
+#
+use lib __FILE__=~s/(.*)\/.*?$/\1/r;
+use Switch;
+use Term::ANSIColor;
+#require Term::ANSIColor or die 'Install libansicolor-perl';
+require Device::SerialPort or die 'Install libdevice-serialport-perl';
+require MIME::Base64 or die 'Install libemail-mime-encodings-perl';
+require Sys::Guestfs or die 'Install libfilesys-virtual-perl';
+require Sys::Virt or die 'Install libsys-virt-perl';
+use clipvirt;
+
+#first of all get the .deb packages
+@deb=grep {/.deb$/} @ARGV;
+@other=grep {!/.deb$/} @ARGV;
+
+# find what cage is the target
+@cage=grep { /\b(rm_[bh]|update|socle|admin)\b/ } @other;
+die " too many targets " if (@cage>1);
+warn " no target defaulting to rm_b " and push @cage,"rm_b" unless(@cage);
+($cage)=@cage;
+
+#find the domain to reach
+@domain=grep { !/\b(rm_[bh]|update|socle|admin)\b/ } @other;
+die " too many targets " if (@domain>1);
+die " no many targets " unless(@domain);
+($domain)=@domain;
+
+my $vmm,$dom,$connection;
+#
+#Now contact libvirt and ask for the domain
+#
+$vmm=Sys::Virt->new(uri=>"qemu:///system");
+#@doms=$vmm->list_domains();
+$dom=$vmm->get_domain_by_name($domain) or die "cannot bind to domain $domain";
+$connection=clipvirt->new();
+
+# we catch SIGINT interrupt
+$SIG{'INT'} = sub {$connection->{console}->finish() if $connection->{console};
+			print "AAAAAAAAAAAAAH got killed"; exit(0);};
+$connection->get_console(shift);
+
+#put / rw
+$connection->send_command("mount -o remount -o rw /\n");
+
+# copy the file in the right path
+my $precmd="";
+switch ($cage) {
+	case /rm_[bh]/ {
+		$remote_path="/vservers/".$cage."/update_priv/var/";
+		print "uploading to $remote_path\n";
+		$connection->upload_files(@deb, $remote_path);
+		$precmd="vsctl $cage enter -c update -- ";
+	}
+	case /(update|admin)/ {
+		$remote_path="/mounts/".$cage."_priv/var/";
+		print "uploading to $remote_path\n";
+		$connection->upload_files(@deb, $remote_path);
+		$precmd="vsctl $cage enter -- ";
+	}
+	case socle {
+		$remote_path="/var/";
+		print "uploading to $remote_path\n";
+		$connection->upload_files(@deb, $remote_path);
+	}
+	else { print "nom de cage non reconnu"; }
+}
+
+#do the actual install operations
+print "installing the package(s)...";
+$connection->send_command("$precmd /usr/bin/dpkg -i /var/".$_=~s/.*\///r."\n") for(@deb);
+print " done\n";
+
+#serial port back in default operation
+$connection->{console}->finish();
+print "Bye\n";
+
+=pod
+
+=head1 NAME
+
+deploy-deb-serial
+
+=head1 SYNOPSIS
+
+  deploy-deb-serial C<libvirt-domain> C<cage> C<files> [ C<...> ]
+
+=head1 DESCRIPTION
+
+This program uploads ans install .deb produced in clip SDK in virtual
+machines manged by C<libvirt>.
+
+=head2  limitations
+
+Currently only C<rm_b> and C<rm_h> cages are supported
+
+=cut
+

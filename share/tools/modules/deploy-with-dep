@@ -1,0 +1,95 @@
+#!/usr/bin/perl -l
+# SPDX-License-Identifier: LGPL-2.1-or-later
+# Copyright © 2007-2018 ANSSI. All Rights Reserved.
+require Net::OpenSSH 
+	or die "Cannot find Net:OpenSSH, install libnet-openssh-perl" ;
+use XML::Simple;
+use Term::ANSIColor;
+sub dowork ($);
+
+
+$path=(`readlink -f -- $0`=~s/(.*)\/.*?$/\1/rms);
+chomp $path;
+$sdk=shift;
+$domain=shift;
+$cage=shift;
+$ssh=Net::OpenSSH->new($sdk) or die "Can't ssh to the SDK";
+#on cherche dans les specs un nom correspondant
+#@specs=parseRemotespecs()
+our $tmpdir=`mktemp -d`;
+chomp $tmpdir;
+$SIG{'INT'} = sub { print "Interrupted"; print("rm -rf $tmpdir") if ($tmpdir); exit(0)};
+
+dowork($ARGV[0]);
+
+while(@debtoinstall)
+{
+$file=shift @debtoinstall;	
+print "Installing $file";
+	$outputmsg=`$path/deploy-deb-serial $domain $cage $tmpdir/$file`;
+	if($outputmsg=~/dependency problems/)
+	{
+		unshift @debtoinstall,$file;
+		print "Missing dependencies";
+		@depmiss=$outputmsg=~/depends on (\S*).*;/g;
+		print for (@depmiss);
+		print "\n";
+		# ssh on sdk and build debs
+		for(@depmiss)
+		{
+		  dowork $_;
+		}
+	}	
+}
+
+#sub parseRemotespecs 
+#{
+# for my $remotespec ($ssh->capture("find /opt/clip-int/specs/clip-rm -name"));
+#}
+
+sub dowork($)
+{
+  my ($pkg)=@_;
+  #$pkg=~s/\//\\\//g;
+  my @res=$ssh->capture("grep -ri '\\b$pkg\\b' /opt/clip-int/specs/");
+  "@res"=~/\b(\S*$pkg)\b/m;
+  my $arg=$1;
+  my $filename;
+  print "Package Name for ".$pkg." : $arg";
+
+  my $debdir=($ssh->capture("grep DEBS_BASE= /etc/clip-build.conf")=~s/DEBS_BASE="(.*)"/\1/r);
+  my $tmp;
+  chomp $debdir;
+  if($tmp=$ssh->capture("ls '$debdir/rm/".$pkg=~s/.*\///r."'".'_* 2>/dev/null'))
+  {
+    print "   I found one .deb ! I take it";
+    $filename=$tmp;
+   # print "PRRRRRRRRRRRRRRR $filename";
+  }
+  else
+  {
+    print "Compiling";
+    my ($res,$err)=$ssh->capture2("clip-compile clip-rm/rm -pkgn $arg");
+    $err=~s/^.*'EULA'$//gm;
+    if ($err=~/\S/) 
+    {
+      print $res;
+      print "something went wrong";
+      print " trying to clip-compile --depends";
+      print " --------------------------";
+      ($res,$err)=$ssh->capture2("clip-compile clip-rm/rm --depends -pkgn $arg");
+      $err=~s/^.*'EULA'$//gm;
+      if ($err=~/\S/) {print $res,"\n--------------------------"; die $err};
+      ($res,$err)=$ssh->capture2("clip-compile clip-rm/rm -pkgn $arg");
+      $err=~s/^.*'EULA'$//gm;
+      if ($err=~/\S/) {print $res,"\n--------------------------"; die $err}; 
+    }
+
+    $filename=$1 if ($res=~/Built debian package\s+(.*)/);
+  }
+#TIMTOWTDI :-)
+  chomp $filename;
+  $ssh->scp_get({},$filename,"$tmpdir");
+  print "Fetched : ",$filename=~s!.*/!./!r;
+  unshift @debtoinstall, $filename=~s!.*/!./!r;
+}

@@ -1,0 +1,138 @@
+#!/bin/sh -e
+# SPDX-License-Identifier: LGPL-2.1-or-later
+# Copyright © 2007-2018 ANSSI. All Rights Reserved.
+
+# clip-dpkg - Clip packages tool
+# Copyright (C) 2012 ANSSI
+# Author: Mickaël Salaün <clipos@ssi.gouv.fr>
+# All rights reserved
+
+source "/etc/clip-build.conf"
+
+TMPD=""
+
+cleanup() {
+	trap - QUIT INT TERM EXIT
+	if [ -d "${TMPD}" ]; then
+		rm -rf -- "${TMPD}"
+	fi
+}
+
+cat_use_one() {
+	local deb="$1"
+	local ret=0
+	TMPD="$(mktemp -d)"
+	trap cleanup QUIT INT TERM EXIT
+	if dpkg --control -- "${deb}" "${TMPD}"; then
+		cat "${TMPD}/use"
+	else
+		ret=1
+	fi
+	cleanup
+	return ${ret}
+}
+
+cat_use() {
+	local flags=" "
+	local deb
+	for deb in "$@"; do
+		flags+="$(cat_use_one "${deb}") " || return 1
+	done
+	echo "${flags}" | tr ' ' '\n' | sort -u | sed '/^$/d'
+}
+
+MYSELF="$(basename -- "$0")"
+CMD="$1"
+
+usage() {
+	echo "usage:" >&2
+	echo "  ${MYSELF} getuse <deb>...            Print use flags" >&2
+	echo "  ${MYSELF} hasuse <flag> <deb>...     Return 0 if the (regexp) use flag is used" >&2
+	echo "  ${MYSELF} portage <deb>...           Print the origin portage overlay and ebuild" >&2
+}
+
+cmd_getuse() {
+	if [ $# -ge 1 ]; then
+		local flags="$(cat_use "$@")" || return 1
+		echo "${flags}" | tr '\n' ' '
+		echo
+		return 0
+	fi
+	usage
+	return 1
+}
+
+cmd_hasuse() {
+	if [ $# -ge 2 ]; then
+		local search="$1"
+		shift
+		local ret=0
+		local flag deb
+		for deb in "$@"; do
+			flag="$(cat_use "${deb}")" || return 1
+			if ! echo -n "${flag}" | grep -qE "^${search}\$"; then
+				ret=1
+				break
+			fi
+		done
+		return ${ret}
+	fi
+	usage
+	return 1
+}
+
+getportage() {
+	local ret=0
+	local deb field_version field_source field_section atom portage
+	for deb in "$@"; do
+		ret=1
+		field_version="$(dpkg -f "${deb}" Version)" || break
+		field_source="$(dpkg -f "${deb}" Source)" || break
+		field_section="$(dpkg -f "${deb}" Section)" || break
+		if [ -z "${field_version}" -o -z "${field_section}" -o -z "${field_source}" ]; then
+			break
+		fi
+		atom="${field_section}/${field_source/%-${field_version}/}"
+		pushd "${CLIP_BASE}" >/dev/null
+		for portage in portage*/"${atom}"; do
+			if [ -d "${portage}" ]; then
+				echo "${portage}"
+				ret=0
+			fi
+		done
+		popd >/dev/null
+	done
+	return ${ret}
+}
+
+cmd_getportage() {
+	if [ $# -ge 1 ]; then
+		local out
+		out="$(getportage "$@")" || return 1
+		echo "${out}" | sort -u
+		return 0
+	fi
+	usage
+	return 1
+}
+
+case "${CMD}" in
+	getuse)
+		shift
+		cmd_getuse "$@"
+		exit $?
+		;;
+	hasuse)
+		shift
+		cmd_hasuse "$@"
+		exit $?
+		;;
+	portage)
+		shift
+		cmd_getportage "$@"
+		exit $?
+		;;
+esac
+
+usage
+exit 1

@@ -1,0 +1,168 @@
+#!/usr/bin/perl
+# SPDX-License-Identifier: LGPL-2.1-or-later
+# Copyright © 2007-2018 ANSSI. All Rights Reserved.
+#
+#  clip-cleanconfigs - remove all packages from the current
+#  directory which are not referenced by one or several 
+#  configs.
+#  Copyright (C) 2009 SGDN/DCSSI
+#  Copyright (C) 2010 ANSSI
+#  Author: Vincent Strubel <clipos@ssi.gouv.fr>
+#
+#  All rights reserved.
+#
+
+use strict;
+use warnings;
+use Getopt::Long;
+
+my $g_pretend = 0;
+my $g_interactive = 0;
+my $g_ask = 0;
+
+sub usage($) {
+	my $out = shift;
+	my $progname = $0;
+	$progname =~ s:.*\/::;
+	
+	print $out <<ENDHELP;
+	
+$progname : remove all packages from the current directory 
+which are not referenced by one or several configurations.
+
+This is done by creating a union of the dependencies (Depends: and Suggests:)
+of all the configurations passed as argument, then removing any package that
+is not referenced in that union.
+
+Usage: $progname [options] <config1>.deb [<config2>.deb ... <configN>.deb]
+  with the following supported options: 
+    -a : print what would be removed, then ask for confirmation before removing.
+    -i : ask for confirmation for each removal.
+    -p : only print what would be removed.
+
+ENDHELP
+}
+
+sub confirm();
+
+sub confirm() {
+	print "Confirm (y/n) ?\n";
+	my $a = <STDIN>;
+	chomp $a;
+	my $ua = uc $a;
+	return 0 if (($ua eq "N") or ($ua eq "NO"));
+	return 1 if (($ua eq "Y") or ($ua eq "YES"));
+
+	print "Unsupported answer: $a\n";
+	return confirm();
+}
+
+sub do_remove($) {
+	my $p = shift;
+	print "Removing $p... ";
+	return 1 if ($g_interactive and not confirm);
+	if (unlink "$p") {
+		print "  ok\n";
+	} else {
+		print STDERR "  failed to remove $p\n";
+	}
+}
+
+######################### MAIN ################################
+
+eval {
+	GetOptions (
+		'a'		=>	\$g_ask,
+		'i'		=>	\$g_interactive,
+		'p'		=>	\$g_pretend,
+		'help'		=>	sub {usage(*STDOUT{IO}); exit 0},
+	) or die 1;
+};
+
+if ($@) {
+	usage(*STDERR{IO});
+	die "Wrong options, aborting";
+}
+
+
+sub get_deps($$$$) {
+	my ($pkg, $arch, $field, $out) = @_;
+
+	open PIPE, "dpkg -f \'$pkg\' $field 2>&1 |";
+	my @output = <PIPE>;
+	close PIPE;
+	if ($?) {
+		print "Failed to get $field dependencies on $pkg\n";
+		foreach (@output) {
+			print "dpkg output: $_\n";
+		}
+		return 0;
+	}
+
+	return 1 unless (defined ($output[0]));
+
+	my @deps = split ",", $output[0];
+
+	foreach my $dep (@deps) {
+		if ($dep =~ /(\S+) \(= (\S+)\)/) {
+			my $pname = $1;
+			my $pver = $2;
+
+			$out->{"$pname"."_"."$pver"."_"."$arch".".deb"} = 1;
+		} else {
+			print "Invalid dependency atom: $dep";
+			return 0;
+		}
+	}
+	return 1;
+}
+
+my $conf = $ARGV[0];
+unless (defined($conf)) {
+	usage(*STDERR{IO});
+	die "Missing a configuration argument.\n";
+}
+
+my $arch;
+if ($conf =~ /_([^_]+)\.deb$/) {
+	$arch = $1;
+} else {
+	die "cannot extract arch from config name: ".(basename $conf)."\n";
+}
+
+my %deps = ();
+foreach my $cf (@ARGV) {
+	die "Failed to get Depends\n"
+		unless (get_deps($cf, $arch, "Depends", \%deps));
+	die "Failed to get Suggests\n"
+		unless (get_deps($cf, $arch, "Suggests", \%deps));
+
+	$deps{$cf} = 1;
+}
+
+my @rm = ();
+
+foreach my $deb (<*.deb>) {
+	chomp $deb;
+	push @rm, ($deb) unless (defined $deps{$deb});
+}
+
+unless ($#rm >= 0) {
+	print "No unreferenced packages found.\n";
+	exit 0;
+}
+
+if ($g_pretend or $g_ask) {
+	foreach (@rm) {
+		print "To be removed: $_.\n";
+	}
+}
+exit 0 if ($g_pretend);
+
+exit 0 if ($g_ask and not confirm);
+
+foreach (@rm) {
+	do_remove($_);
+}
+	
+

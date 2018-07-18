@@ -1,0 +1,258 @@
+#!/usr/bin/env perl
+# SPDX-License-Identifier: LGPL-2.1-or-later
+# Copyright © 2007-2018 ANSSI. All Rights Reserved.
+
+#
+#  clip-patch-split - split a patch into individual per-file
+#  patches.
+#  Copyright (C) 2006 SGDN/DCSSI
+#  Author: Vincent Strubel <clipos@ssi.gouv.fr>
+#  Can't remember why I ever needed that, but there it is...
+#
+#  All rights reserved.
+#
+
+use strict;
+use warnings;
+use Getopt::Long;
+
+############# Protos #########
+sub usage($);
+sub debug1($);
+sub grumble($);
+sub parseCmdLine();
+sub doInput($);
+sub findFirst($);
+sub doOneFile($$);
+sub genFileName($);
+
+############# Glob Vars ########
+my $g_opts = {
+	verbosity	=> 0,
+	conflicts	=> 0,
+	cutdepth	=> 0,
+	dir		=> "",
+};
+
+my $g_progname;
+############# Main ###########
+$g_progname = $0;
+$g_progname =~ s:.*/::;
+
+if (not parseCmdLine()) {
+	usage(*STDERR{IO});
+	die "\nUnable to parse command line, aborting";
+}
+
+debug1("debug level : $g_opts->{'verbosity'}");
+
+foreach my $in_file (@ARGV) {
+	doInput($in_file);
+}
+
+exit 0;
+
+
+############# Subs #########
+sub usage($) {
+	my $out = shift;
+	print $out <<ENDHELP;
+$g_progname : split unified patches into multiple one-file patches
+  Usage : $g_progname [options] <file> [<file2> <file3>...]
+  Options:
+          -v[erbose]   : be more verbose
+	  -c[onflicts] : do not stop if a patch exists, write to <outfile>.1
+	  -d[ir] <dir> : put all outputs in <dir>
+	  -p <depth>   : chop <depth> levels from pathnames, similar to patch -pX
+ENDHELP
+}
+
+sub debug1($) {
+	return 1 
+		if (not $g_opts->{'verbosity'} > 0);
+
+	my $msg = shift;
+	$msg = "$g_progname: DEBUG1: $msg\n";
+
+	print STDOUT $msg;
+}
+
+sub grumble($) {
+	my $msg = shift;
+	$msg = "$g_progname: WARNING: $msg\n";
+
+	print STDERR $msg;
+}
+	
+sub parseCmdLine() {
+	eval {
+		GetOptions (
+			'verbose+' 	=>	\$g_opts->{'verbosity'},
+			'conflicts'	=>	\$g_opts->{'conflicts'},
+			'p=i'		=>	\$g_opts->{'cutdepth'},
+			'dir=s'		=>	\$g_opts->{'dir'},
+		) or die 1;
+	};
+
+	return 0 
+		if ($@);
+
+	if ($#ARGV < 0) {
+		grumble("Please specify at least one input");
+		die "\nNothing to do";
+	} 
+	
+	foreach (@ARGV) {
+		if (not -r $_) {
+			grumble("$_ is not readable");
+			die "\nWrong args, aborting";
+		}
+	}
+	if ($g_opts->{'dir'} and not -d $g_opts->{'dir'}) {
+		use File::Path;
+		grumble("Creating $g_opts->{'dir'}");
+		mkpath($g_opts->{'dir'}) 
+			or die "Cannot create $g_opts->{'dir'} directory";
+	}
+
+	return 1;
+}
+
+
+sub doInput($) {
+	my $in = shift;
+	my $filename;
+
+	open IN, "<", $in
+		or die "WTF ? $in can no longer be read !";
+
+	my $line = findFirst(*IN{IO});
+
+	return 0 
+		if (not $line);
+  INPUTLOOP:  	
+	while ($line) {
+		$line = doOneFile(*IN{IO}, $line);
+		# note : valid line should start with '-', no
+		# name conflict expected for markers
+		goto ERROR if ($line eq 'INVALID');
+		last INPUTLOOP if ($line eq 'END');
+	}
+
+	close IN;
+	return 1;
+  ERROR:
+	close IN;
+	return 0;
+}
+
+sub findFirst($) {
+	my $in = shift;
+	my $line;
+	my $printline;
+
+  PARSEFIRST:
+	while ($line = <$in>) {
+		next PARSEFIRST if (not $line =~ /^diff/);
+		
+		# check next line just to be sure...
+		$printline = <$in>;
+		next PARSEFIRST if (not $printline =~ /^---/);
+		goto OUTFOUND;
+	}
+	
+	grumble("$in : Empty patch ?"); 
+	return "";
+
+  OUTFOUND:
+  	return $printline;
+}
+
+sub doOneFile($$) {
+	my ($in,$line) = @_;
+	my $keepline;
+	my $readline;
+	my $filename = genFileName($line);
+
+	if (not $filename) {
+		grumble("Cannot find filename for $line");
+		return 'INVALID';
+	}
+
+  FINDFILE:	
+	if (-e $filename) {
+		grumble("$filename exists");
+		if ($g_opts->{'conflicts'}) {
+			$filename .= ".1";
+			goto FINDFILE;
+		} else {
+			grumble("Will abort here.");
+			grumble("Pass -c on cmd line to change this.");
+			return 'INVALID';
+		}
+	}
+
+	open OUT, ">", $filename 
+		or die "Cannot open $filename for writing";
+
+	print STDOUT "Writing $filename...\n";
+
+	print OUT $line;
+
+  PRINTLOOP:
+	while ($line = <$in>) {
+  RETEST:
+		if (not $line =~ /^diff/) {
+			print OUT $line;
+			next PRINTLOOP;
+		}
+		$keepline = <$in>;
+		if (not $keepline) {
+			grumble("weird EOF?");
+			print OUT $line;
+			last PRINTLOOP;
+		}
+		if (not $keepline =~ /^---/) {
+			print OUT $line;
+			$line = $keepline;
+			goto RETEST;
+		}
+
+		goto OUT_NEXTFILE;
+	}
+	# EOF reached
+	return "END";
+  
+  OUT_NEXTFILE:
+  	return $keepline;
+}
+
+# Generate unique patch filename for a '--- foo/bar' line
+sub genFileName($) {
+	my $line = shift;
+
+	#chop extra chars / words
+	chomp $line;
+	$line =~ s/^---\s+//;
+	$line =~ s/\s+.*$//;
+
+	my $filename = $line;
+
+	if ($g_opts->{'cutdepth'} != 0) {
+		debug1("cutting to depth $g_opts->{'cutdepth'}");
+		# I'm sure this can be done in just one regexp...
+		for (1 .. $g_opts->{'cutdepth'}) {
+			if (not $filename =~ s:^[^/]+/::) {
+				grumble("chopping $line failed");
+				return "";
+			}
+		}
+	}
+
+	$filename =~ s:/:_:g;
+	if ($g_opts->{'dir'}) {
+		$filename = "$g_opts->{'dir'}/$filename";
+	}
+
+	return "$filename.unipatch";
+}

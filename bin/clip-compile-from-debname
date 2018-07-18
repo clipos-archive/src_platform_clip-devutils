@@ -1,0 +1,100 @@
+#!/usr/bin/env python2
+# -*- coding: utf-8 -*-
+# SPDX-License-Identifier: LGPL-2.1-or-later
+# Copyright © 2007-2018 ANSSI. All Rights Reserved.
+
+import clip_pkgdb
+import glob
+import os
+import subprocess
+import logging
+import argparse
+import sys
+
+
+def main(args):
+    logging.basicConfig(filename=args.logging_file,level=logging.INFO)
+    
+    # load clip-pkgdb
+    database_path=clip_pkgdb.get_clip_base(False)+"/"+clip_pkgdb.CLIP_INT_PKGDB_PATH
+    db=clip_pkgdb.PackageDb(database_path)
+    db.load()
+   
+    logging.warning("pkgdb database="+database_path)
+
+    # try to compile each package corresponding to a deb_name
+    for deb_name in args.debname_list:
+        compile_pkg(deb_name, args.debian_configuration_package, db)
+
+
+# ------------------------------------------------------------
+# clip-compile pkg
+# arguments :
+#   - pkg_object : clip-pkgdb pkg object
+#   - conf_deb : debian pkg : clip-core-conf / apps-conf / rm-apps-conf /...
+#   - db : clip-pkgdb database file
+def compile_pkg(deb_name, conf_deb_file_path, db):
+    logging.warning("try to compile : " + deb_name)
+    specPosition=getSpecPositionFromConfPkg(conf_deb_file_path)
+    species=specPosition.split("/")[0]
+
+    logging.warning("spec position : "+specPosition)
+
+    pkg_list=db.getPkgObjFromDeb(deb_name,species)
+    # faire un test si liste vide ou ayant plus de un élément
+    # écrire alors dans fichier de log
+    if (len(pkg_list) == 0) :
+        logging.warning("No corresponding pkg in clip_pkgdb")
+        logging.warning("Debian configuration package out of sync with svn mirror")
+        return      
+        
+    if (len(pkg_list) > 1):
+        logging.warning("More than one corresponding pkg in clip_pkgdb")
+        return
+
+    # si un seul 
+    for pkg in pkg_list :
+        logging.warning("found "+pkg.category+"/"+pkg.name)
+        category=pkg.category
+        name=pkg.name
+        # dependances
+        logging.info("Building dependencies process starts")
+        res=subprocess.check_output(["clip-compile",specPosition,"--depends","-pkgn", category+"/"+name])
+        logging.info("Building dependencies process ends")
+        # compilation du paquet
+        logging.info("Building package process starts")
+        res=subprocess.check_output(["clip-compile",specPosition,"-pkgn", category+"/"+name])
+        logging.info("Building package process ends")
+
+# ------------------------------------------------------------
+# take the complete path to a conf debian package : clip-core-conf.deb etc
+# return the input for clip-compile "clip-rm/clip" "clip-rm/rm" ...
+def getSpecPositionFromConfPkg(conf_pkg_file_path):
+    if ("rm-apps-conf" in conf_pkg_file_path) or ("rm-core-conf" in conf_pkg_file_path):
+        return "clip-rm/rm"
+    
+    res=subprocess.check_output(["dpkg-deb","-I",conf_pkg_file_path,"use"])
+    
+    if ("clip-bare" in res):
+        return "clip-bare/clip"
+    
+    if ("clip-gtw" in res):
+        return "clip-gtw/clip"
+    
+    return "clip-rm/clip"
+
+    
+# ------------------------
+# arguments :
+# ==> debian conf package 
+# ==> debian package name to recompile
+# ==> fichier de log
+if __name__ == "__main__":
+    parser=argparse.ArgumentParser(description="try to open user session and launch konsole")
+    parser.add_argument("debian_configuration_package")
+    parser.add_argument("logging_file")
+    parser.add_argument("debname_list", nargs=argparse.REMAINDER)
+    args=parser.parse_args()    
+    main(args)
+    
+

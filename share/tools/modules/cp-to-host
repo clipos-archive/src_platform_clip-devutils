@@ -1,0 +1,111 @@
+#!/usr/bin/perl 
+# SPDX-License-Identifier: LGPL-2.1-or-later
+# Copyright © 2007-2018 ANSSI. All Rights Reserved.
+#usage  cp-to-vm domain_virt host-path vm_file*
+
+# as usual remote-path must be a directory if there is more than 
+# on file to transfert
+#  
+#The VM must be instrumented with a serial port opened for login in
+#
+#BEGIN {push @INC,"modules"}
+
+use lib __FILE__=~s/(.*)\/.*?$/\1/r;
+use Term::ANSIColor qw/colored/;
+require Sys::Guestfs or die 'Install libfilesys-virtual-perl';
+require Sys::Virt or die 'Install libsys-virt-perl';
+
+
+# ------------------------------------------------
+# TODO : il y a une erreur a la tentative de montage de
+# /dev/sda3 sur /var/log, il ne trouve pas ce dernier
+
+# ------------------------------------------------
+# test if guest channel exists : if not then exit
+sub test_if_guest_channel_exists{
+    my $vmm=Sys::Virt->new(uri=>"qemu:///system");
+    my $dom=$vmm->get_domain_by_name("clip-443-instable");
+    my $description = $dom->get_xml_description();
+    
+    if (not ($description=~ m/org\.libguestfs\.channel/)) {
+        print "erreur : créer le channel unix ayant pour cible org.libguestfs.channel.x \n";
+        exit(0);
+    }
+    print "test ok : le channel org.libguestfs.channel.x existe.\n";
+}
+
+sub mount_part{
+    my $guestfs=shift;
+    $guestfs->mount("/dev/sda5","/");
+    $guestfs->mount("/dev/sda2","/home");
+    $guestfs->mount("/dev/sda7","/vservers/rm_h");
+    $guestfs->mount("/dev/sda8","/vservers/rm_b");
+    $guestfs->mount("/dev/sda6","/mounts");
+    # $guestfs->mount("/dev/sda3","/var/log");        
+}
+
+sub umount_part{
+    my $guestfs=shift;
+    $guestfs->umount("/home");
+    # $guestfs->umount("/var/log");
+    $guestfs->umount("/vservers/rm_h");
+    $guestfs->umount("/vservers/rm_b");
+    $guestfs->umount("/mounts");
+    $guestfs->umount("/");
+}
+
+# -------------------------------------------------
+# main
+my $domain_name=shift;
+my $host_path=shift;
+my @files_to_copy=@ARGV;
+
+my $g = Sys::Guestfs->new ();
+
+$SIG{'INT'} = sub { umount_part($g);
+                    $g->shutdown ();
+                    $g->close ();
+                    print "shutdown and close on process killed"; exit(0);};
+
+$g->add_domain($domain_name,libvirturi=>"qemu:///system",readonly=>1,readonlydisk=>"read");
+$g->launch();
+ 
+mount_part($g);
+
+foreach $file_to_copy (@files_to_copy) {
+    
+    if (not ($file_to_copy=~/^\//)) {
+        print "attention le chemin de ".$file_to_copy." doit etre absolu.\n";
+        next;
+    }
+    
+    if (not $g->exists($file_to_copy)) {
+        print "attention le fichier ".$file_to_copy." n'est pas vu. Peut être la partition sur laquelle il se trouve n'est pas montée dans ce script.\n";
+        next;
+    }
+    print "copie de $file_to_copy vers $host_path\n";
+    $g->copy_out($file_to_copy,$host_path);
+}
+
+umount_part($g);
+
+$g->shutdown();
+$g->close();
+print "Bye\n";
+
+=pod
+
+=head1 NAME
+
+cp-to-host
+
+=head1 SYNOPSISfdisk
+
+  cp-to-host C<host-destination-path> C<file*> 
+
+=head1 DESCRIPTION
+
+This program downloads files from a running virtual machine to a host.
+
+=cut
+

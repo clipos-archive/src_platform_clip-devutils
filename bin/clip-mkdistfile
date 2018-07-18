@@ -1,0 +1,141 @@
+#!/bin/bash
+# SPDX-License-Identifier: LGPL-2.1-or-later
+# Copyright © 2007-2018 ANSSI. All Rights Reserved.
+#
+# clip-mkdistfile - create archive in distfiles{,-dev} directories
+# Copyright (C) 2010,2012,2017 ANSSI
+# Author: Mickaël Salaün <clipos@ssi.gouv.fr>
+# All rights reserved.
+
+set -e -o pipefail
+
+if [ -f "/lib/rc/sh/functions.sh" ]; then
+	source "/lib/rc/sh/functions.sh"
+else
+	ewarn() { echo " * $*" >&2; }
+	eerror() { echo " * $*" >&2; }
+	ebegin() { echo -n " * $*"; }
+	eend() { if [ "$1" -eq 0 ]; then printf "\t[ ok ]\n"; else printf "\t[ error ]\n"; fi; }
+fi
+
+die() {
+	if [ $# -gt 0 ]; then
+		eerror "$*"
+	fi
+	exit 1
+}
+
+die_end() {
+	eend 1
+	die "$*"
+}
+
+if [ -z "${CLIP_BASE}" ]; then
+	if [ -f "/etc/clip-build.conf" ]; then
+		source "/etc/clip-build.conf"
+	else
+		die "You need to set the environment variable CLIP_BASE pointing to the parent directory of the distfiles"
+	fi
+fi
+
+MYSELF="$(basename -- "$0")"
+usage() {
+	# pkg-path can be a Subversion URL (used by clip-getdistfile)
+	echo "usage: ${MYSELF} [-d] <pkg-version> [pkg-path]" >&2
+}
+
+CLIP_DISTFILE="${CLIP_BASE}/distfiles/"
+CLIP_DISTFILEDEV="${CLIP_BASE}/distfiles-dev/"
+
+if [ "$1" = "-d" ]; then
+	shift
+	CLIP_DISTFILE="${CLIP_DISTFILEDEV}"
+fi
+
+VERSION="$1"
+if [ -z "$2" ]; then
+	NEEDSVN=1
+	PKG_PATH="$(pwd)"
+else
+	NEEDSVN=0
+	PKG_PATH="$2"
+fi
+
+if [ $# -gt 2 -o -z "${PKG_PATH}" -o -z "${VERSION}" ]; then
+	usage
+	exit 1
+fi
+
+NOSVN=0
+SVN_INFO="$(svn info "${PKG_PATH}" 2>/dev/null)" || NOSVN=1
+
+if [ "${PKG_PATH##https://}" = "${PKG_PATH}" ]; then
+	PKG_PATH="$(readlink -f -- "${PKG_PATH}")"
+elif [ "${NOSVN}" -eq 1 ]; then
+	die "Failed to checkout URL: ${PKG_PATH}"
+fi
+
+if [ ${NOSVN} -eq 1 ]; then
+	if [ ${NEEDSVN} -eq 1 ]; then
+		die "You must set a path if there is no SVN in the current directory"
+	fi
+	PKG_NAME="$(basename -- "${PKG_PATH}")"
+else
+	PKG_NAME="$(echo "${SVN_INFO}" | sed -n -r 's,^URL: https://[^/]*/clip-dev/([^/]+)/[^/]+/[^/]+.*$,\1,p')"
+	SVN_RELDIR="$(echo "${SVN_INFO}" | sed -n -r 's,^URL: https://[^/]*/clip-dev/[^/]+/[^/]+/[^/]+(.*$),\1,p')"
+	PKG_PATH="${PKG_PATH%%${SVN_RELDIR}}"
+fi
+ARCHIVE_NAME="${PKG_NAME}-${VERSION}"
+ARCHIVE_FULL="${ARCHIVE_NAME}.tar.xz"
+
+if [ -z "${PKG_NAME}" ]; then
+	die "Unable to find the project name"
+fi
+
+# remove old artifacts
+ARCHIVE_DST="${CLIP_DISTFILE}/${ARCHIVE_FULL}"
+if [ -e "${ARCHIVE_DST}" ]; then
+	rm -- "${ARCHIVE_DST}" || die_end
+	# avoid "ebuild * manifest" to get crazy about the distfile update, if we are in the good directory
+	sed -i -e "/^DIST ${ARCHIVE_FULL} /d" Manifest 2>/dev/null || true
+fi
+
+TMPD=""
+cleanup() {
+	trap - QUIT INT TERM EXIT
+	popd >/dev/null 2>&1 || true
+	if [ -d "${TMPD}" ]; then
+		rm -rf -- "${TMPD}"
+	fi
+}
+
+ebegin "Creating $(basename -- "${CLIP_DISTFILE}") ${ARCHIVE_FULL}"
+
+TMPD="$(mktemp -d)" || die_end
+trap cleanup QUIT INT TERM EXIT
+pushd "${TMPD}" >/dev/null
+
+MASK="$(umask)"
+umask 0022
+if [ ${NOSVN} -eq 1 ]; then
+	# rsync --recursive --links --chmod=u=rwX,go=rX --exclude=.svn --exclude=.git -- "${PKG_PATH}/" "${ARCHIVE_NAME}" || die_end
+	mkdir "${ARCHIVE_NAME}"
+	(cd "${PKG_PATH}" && git archive HEAD -- .) | \
+		tar --extract --file - --directory "${ARCHIVE_NAME}" || die_end
+else
+	svn export -- "${PKG_PATH}" "${ARCHIVE_NAME}" >/dev/null || die_end
+fi
+umask "${MASK}"
+
+# Fix directory permissions (not affected by umask)
+find "${ARCHIVE_NAME}" -type d -exec chmod 0755 -- {} +
+
+# Deterministic tarball (the --sort option may not be available), with
+# deterministic date; we can't use git archive because it uses the commit's
+# SHA1 (pax_global_header)
+find "${ARCHIVE_NAME}" -print0 | sort --zero-terminated | \
+	fakeroot -- tar --mtime=@1 --numeric-owner --create --xz --file "${ARCHIVE_DST}" --no-recursion --null --files-from - || die_end
+eend $?
+
+popd >/dev/null
+cleanup

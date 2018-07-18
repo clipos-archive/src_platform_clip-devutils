@@ -1,0 +1,62 @@
+# SPDX-License-Identifier: LGPL-2.1-or-later
+# Copyright © 2007-2018 ANSSI. All Rights Reserved.
+EDITOR="vim"
+
+printsvndiff () { let "prevref=$1-1"; svn diff -r $prevref:$1; }
+gofind () { local MYDIR=$(find /opt/clip-int/ -type d -name $1|tail -n 1) ; [[ -n $MYDIR ]] && cd $MYDIR ; }
+gopfind () { local MYDIR=$(find /root/gentoo/portage -name $1|tail -n 1) ; [[ -n $MYDIR ]] && cd $MYDIR ; }
+godev () { cd "/opt/clip-dev/${1}/branches/clip4" && pwd||ls -1 /opt/clip-dev ; }
+alias goclip="cd /opt/clip-int"
+alias gospec="cd /opt/clip-int/specs/clip-rm"
+alias goconf="cd /opt/clip-int/portage-overlay-clip/clip-conf"
+alias gosrc="cd /mnt/clip-src/clip-git/clip-dev"
+alias g="grep -R --color=auto"
+alias mu="mount /mnt/usb"
+alias umu="umount /mnt/usb"
+alias reboot="echo moo"
+
+
+export PS1='\[\033[01;31m\]\h\[\033[01;34m\] \w \$\[\033[00m\] '
+
+checkbuildfull() {
+	pushd /opt/build/debs > /dev/null
+	for i in clip/clip-core-conf_*.deb clip/clip-apps-conf_*.deb rm/rm-core-conf_*.deb rm/rm-apps-conf-*; do 
+		pushd $(dirname ${i}) > /dev/null && \
+		clip-checkconfig $(basename ${i}) && \
+		popd > /dev/null
+	done 
+	popd > /dev/null
+
+}
+
+checkbuild () {
+	checkbuildfull $1|grep dependenc
+}
+
+checkmirrorfull() {
+	pushd $1 > /dev/null
+	for i in clip/clip-core-conf/pool/clip-core-conf_*.deb clip/clip-apps-conf/pool/clip-apps-conf_*.deb rm/rm-core-conf/pool/rm-core-conf_*deb rm/rm-apps-conf/pool/rm-apps-conf-*.deb; do 
+		pushd $(dirname ${i}) > /dev/null && \
+		clip-checkconfig -f $(basename ${i}) 2>&1 | grep -v "Note" && \
+		popd > /dev/null
+	done
+	popd > /dev/null
+
+}
+
+checksign() {
+	for dir in clip clip-hermes rm rm-hermes; do pushd $dir > /dev/null ; clip-checksign -a |xargs clip-sign -a ; popd > /dev/null; done
+}
+
+sign() { 
+	for dir in clip clip-hermes rm rm-hermes; do pushd $dir > /dev/null ; clip-checksign -a ; popd > /dev/null; done
+}
+
+function check-deb-sign () { 
+	echo "checking $@"
+	out=$(ccsd-check -K "$HOME/verif-keys/ctrl.bin" -P "$HOME/verif-keys/ctrl.bin.txt" -k "$HOME/verif-keys/dev.bin" -p "$HOME/verif-keys/dev.bin.txt" -R '[_|-|[:alnum:]]+-CTRL[_|-|[:alnum:]]+'   -r '[_|-|[:alnum:]]+-DEV[_|-|[:alnum:]]+' "$@" 2>&1)
+	if [[ -n "$out" ]]; then
+		echo "signature check failed for $@ Reason:"
+		echo "$out"
+	fi
+}

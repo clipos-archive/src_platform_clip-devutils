@@ -1,0 +1,127 @@
+#!/usr/bin/perl
+# SPDX-License-Identifier: LGPL-2.1-or-later
+# Copyright © 2007-2018 ANSSI. All Rights Reserved.
+
+#
+#  clip-checkconfig - check that all dependencies of a
+#  config package are present in the current directory.
+#  Copyright (C) 2009 SGDN/DCSSI
+#  Copyright (C) 2010-2014 SGDSN/ANSSI
+#  Author: Vincent Strubel <clipos@ssi.gouv.fr>
+#
+#  All rights reserved.
+#
+
+use strict;
+use warnings;
+use Getopt::Long;
+use CLIP::Logger ':all';
+use CLIP::Pkg::QA ':all';
+
+my $g_fullcheck = 0;
+my $g_verbose = 0;
+my $g_list = 0;
+
+sub usage($) {
+	my $out = shift;
+	my $progname = $0;
+	$progname =~ s:.*\/::;
+	
+	print $out <<ENDHELP;
+	
+$progname : check that all dependencies of a config package are present 
+in the current directory.
+
+Usage: $progname [options] <config>.deb
+  with the following supported options: 
+    -f : check paths, priorities and dependencies of all packages (default: simply check presense)
+    -l : simply list all dependencies, then exit
+    -v : verbose
+
+ENDHELP
+}
+
+######################### MAIN ################################
+
+$g_log_prefix = "clip-checkconfig";
+$g_log_syslog = 0;
+$g_log_debug = 0;
+
+eval {
+	GetOptions (
+		'f'		=>	\$g_fullcheck,
+		'l'		=>	\$g_list,
+		'v'		=>	\$g_verbose,
+		'help'		=>	sub {usage(*STDOUT{IO}); exit 0},
+	) or die 1;
+};
+
+if ($@) {
+	usage(*STDERR{IO});
+	die "Wrong options, aborting";
+}
+
+
+my $conf = $ARGV[0];
+die "Usage: clip-checkconfig <config>.deb\n" unless (defined($conf));
+my $arch;
+if ($conf =~ /_([^_]+)\.deb$/) {
+	$arch = $1;
+} else {
+	die "cannot extract arch from config name: ".(basename $conf)."\n";
+}
+
+my $prio = clippkg_get_prio($conf);
+my $dist = clippkg_get_dist($conf);
+
+my %hash = ();
+die "failed to get dep hash" unless clippkg_get_strict_deps_full($conf, $arch, \%hash);
+
+if ($g_list) {
+	print "$conf\n";
+	foreach my $dep (keys %hash) {
+		my $pkg = $hash{$dep}->[1]; # Full path
+		print "$pkg\n";
+	}
+	exit 0;
+}
+
+my $count = 0;
+DEPLOOP:
+foreach my $dep (keys %hash) {
+	my $pkg = $hash{$dep}->[1]; # Full path
+	unless (-f $pkg) {
+		print "Dependency $pkg missing.\n";
+		$count++;
+		next DEPLOOP;
+	}
+	if ($g_verbose) {
+		my $type = $hash{$dep}->[2]; # Type
+		print "Found $dep ($type)\n";
+	}
+
+	if ($g_fullcheck) {
+		clippkg_check_category($pkg, $dist, $prio) or $count++;
+	}
+}
+
+# Add provided packages from the list
+if ($g_fullcheck) {
+	my $provs;
+	die "could not get provided packages" unless (clippkg_add_provided(\%hash));
+	foreach my $dep (keys %hash) {
+		my $pkg = $hash{$dep}->[1]; # Full path
+		if ($pkg ne '-') {
+			clippkg_check_deps($pkg, \%hash) or $count++;
+		}
+	}
+}
+
+if ($count > 1) {
+	print "$count dependencies missing or incorrect for $conf.\n";
+} elsif ($count == 1) {
+	print "1 dependency missing or incorrect for $conf.\n";
+} else {
+	print "All dependencies OK for $conf.\n";
+}
+

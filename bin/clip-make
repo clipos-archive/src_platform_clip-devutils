@@ -1,0 +1,365 @@
+#!/bin/sh
+# SPDX-License-Identifier: LGPL-2.1-or-later
+# Copyright © 2007-2018 ANSSI. All Rights Reserved.
+
+# clip-make - Clip packages manager
+# Copyright (C) 2010-2012,2015 ANSSI
+# Author: Mickaël Salaün <clipos@ssi.gouv.fr>
+# All rights reserved
+
+# This script may need some configuration files in the PKGLIST_DIR directory:
+# * <target>_clip.conf
+# * <target>_rm.conf
+# * <target>_gtw.conf
+# * <target>_varey.conf
+#
+# They list needed ebuild, plus extra arguments if needed:
+#   <ebuild-atom>	[<deb-pkg-name>  [clip-pkg-key]]
+
+source "/lib/rc/sh/functions.sh"
+source "/etc/clip-build.conf"
+
+die() {
+	local msg="$1"
+	eerror "${msg}"
+	exit 1
+}
+
+CLIP_MAKE_CONFIG=${CLIP_MAKE_CONFIG:-~/clip-make.conf}
+if [ ! -e "${CLIP_MAKE_CONFIG}" ]; then
+	die "Unable to find the configuration file: ${CLIP_MAKE_CONFIG}"
+fi
+source "${CLIP_MAKE_CONFIG}"
+
+need_config() {
+	die "The configuration file isn't complete: variable $1 is missing"
+}
+
+#CLIP_PKG="/home/user/clip-pkg"
+[ -n "${CLIP_PKG}" ] || need_config "CLIP_PKG"
+#EXCLUDE_USEFLAGS='clip-hermes|clip-devel|clip-debug'
+[ -n "${EXCLUDE_USEFLAGS}" ] || need_config "EXCLUDE_USEFLAGS"
+#EXCLUDE_PKGNAMES='^strongswan_|-conf(-[bh])?_'
+[ -n "${EXCLUDE_PKGNAMES}" ] || need_config "EXCLUDE_PKGNAMES"
+#USER_NAME="user"
+[ -n "${USER_NAME}" ] || need_config "USER_NAME"
+
+PKGLIST_DIR=${PKGLIST_DIR:-${CLIP_BASE}/pkglist}
+USER_GROUP=${USER_GROUP:-$(grep ":$(id -g "${USER_NAME}"):" /etc/group | cut -d: -f1)}
+
+
+MYSELF="$(basename -- "$0")"
+
+usage() {
+	if [ $# -eq 0 ]; then
+		echo "usage: ${MYSELF} {build <target> | build-update <target> | clean <species> | purge <target> | sync <target> <file>...}" >&2
+	else
+		eerror "usage: ${MYSELF} $*"
+	fi
+}
+
+asuser() {
+	su "${USER_NAME}" -c "$*"
+}
+alias svn="asuser svn"
+
+update_missing() {
+	local deb_type="$1"
+	local deb_src="$2"
+	local deb_name="$(basename "${deb_src}")"
+	local deb_dst="${CLIP_PKG}/${deb_type}/${deb_name}"
+	local tmpd
+	if echo "${deb_name}" | grep -vqE "${EXCLUDE_PKGNAMES}"; then
+		if diff -q "${deb_src}" "${deb_dst}" >/dev/null 2>&1; then
+			einfo "Same ${deb_name}"
+		elif ! clip-dpkg hasuse "${EXCLUDE_USEFLAGS}" "${deb_src}"; then
+			pushd "$(dirname "${deb_dst}")" >/dev/null
+			local error=0
+			if [ -e "${deb_name}" ]; then
+				ewarn "Replacing ${deb_name}"
+			else
+				local deb_orig="$(ls -1 -- "${deb_name/%_*_*.deb}"_*.deb)"
+				if [ -e "${deb_orig}" ]; then
+					einfo "Updating ${deb_name}"
+					svn mv "${deb_orig}" "${deb_name}"
+				elif [ -n "${deb_orig}" ]; then
+					eerror "Can't update ${deb_orig}"
+					error=1
+				else
+					ewarn "Adding ${deb_name}"
+					svn add "${deb_name}"
+				fi
+			fi
+			if [ "${error}" -eq 0 ]; then
+				mv -- "${deb_src}" "${deb_name}"
+				chown "${USER_NAME}:${USER_GROUP}" "${deb_name}"
+			fi
+			popd >/dev/null
+			#sed -i -r "s/^[^#].*\/${deb_name/%_*_*.deb}\$/#\0/" "${PKGLIST_DIR}/missing_${deb_type}.conf" 2>/dev/null
+		fi
+	fi
+}
+
+# TODO: extract version if available
+match_deb() {
+	local deb_target="$1"
+	local deb_pkg="$2"
+	local pkg_file="$3"
+	local pkg_section="${deb_pkg/%\/*/}"
+	local pkg_source="${deb_pkg/#*\//}"
+	pkg_source="${pkg_source//_/-}"
+	if [[ -z "${pkg_file}" ]]; then
+		pkg_file="$(echo "${pkg_source}" | tr '[:upper:]' '[:lower:]')"
+	fi
+	for deb_file in "${DEBS_BASE}/${deb_target}/${pkg_file}_"*.deb; do
+		[ -f "${deb_file}" ] || continue
+		field_version="$(dpkg -f "${deb_file}" Version)"
+		field_source="$(dpkg -f "${deb_file}" Source)"
+		field_source="${field_source/%-${field_version}/}"
+		[ "${field_source}" == "${pkg_source}" ] || continue
+		[ "$(dpkg -f "${deb_file}" Section)" == "${pkg_section}" ] || continue
+		echo -n "${deb_file} "
+	done
+}
+
+version_in_portage() {
+	local pkgname="$1"
+	echo $(emerge --search "%@^${pkgname}$" 2>/dev/null | grep 'version available' | rev | cut -d' ' -f1 | rev | sed 's/_//g')
+}
+
+build_list() {
+	local deb_target="$1"
+	local deb_list="$2"
+	local deb_type clip_species
+	case "${deb_target}" in
+		clip|rm)
+			deb_type="${deb_target}"
+			clip_species="clip-rm"
+			;;
+		gtw)
+			deb_type="clip"
+			clip_species="clip-gtw"
+			;;
+		bare)
+			deb_type="clip"
+			clip_species="clip-bare"
+			;;
+		*)
+			eerror "Unknown target: ${deb_target}"
+			return 1
+			;;
+	esac
+	shift
+	while [[ -f "${deb_list}" ]]; do
+		einfo "Processing ${HILITE}$(basename "${deb_list}")${NORMAL}"
+		eindent
+		while read pkgname pkgdeb pkgkey; do
+			[[ -z "${pkgname/##*/}" ]] && continue
+			if [[ -n "${pkgkey}" ]]; then
+				pkgdesc="${pkgkey}"
+			elif [[ -n "${pkgdeb}" ]]; then
+				pkgdesc="${pkgname/\/*}/${pkgdeb}"
+			else
+				pkgdesc="${pkgname}"
+			fi
+			deb_list="$(match_deb "${deb_target}" "${pkgname}" ${pkgdeb})"
+			if [ -n "${deb_list}" ]; then
+				if [ -n "${BUILD_UPDATE}" ]; then
+					version_in_portage=$(version_in_portage "$pkgname")
+					deb_versions=""
+					found_up_to_date=""
+					for deb_file in ${deb_list}; do
+						version_of_deb="$(dpkg -f "${deb_file}" Version)"
+						deb_versions="${deb_versions} ${version_of_deb}"
+						if [ "${version_in_portage}" = "${version_of_deb}" ]; then
+							found_up_to_date="yes"
+							break
+						fi
+					done
+					if [ -n "${found_up_to_date}" ]; then
+						einfo "${pkgdesc} : Up-to-date (${version_in_portage})"
+						continue
+					else
+						ewarn "${pkgdesc} : Version mismatch, rebuilding (deb:${deb_versions} ; portage: ${version_in_portage})"
+					fi
+				else
+					einfo "exist: ${pkgdesc} -> ${deb_list}"
+					continue
+				fi
+			fi
+			einfo "Processing ${pkgdesc}"
+			#TODO: clip-compile --depends
+			if [[ -n "${pkgkey}" ]]; then
+				clip-compile "${clip_species}/${deb_type}" -pkgkey "${pkgkey}"
+			else
+				clip-compile "${clip_species}/${deb_type}" -pkgnames "${pkgname}"
+			fi
+			deb_list_2="$(match_deb "${deb_target}" "${pkgname}" ${pkgdeb})"
+			new_debs=$(echo "${deb_list} ${deb_list_2}" | tr ' ' '\n' | sort | uniq -u | tr '\n' ' ')
+			if [ -z ${new_debs} ]; then
+				eerror "no new deb: ${pkgname}"
+				continue
+			fi
+			eindent
+			for deb_file in ${new_debs}; do
+				ebegin "Signing $(basename "${deb_file}")"
+				clip-sign -a "${deb_file}"
+				eend $?
+				#update_missing "${deb_target}" "${deb}"
+			done
+			eoutdent
+		done <"${deb_list}"
+		eoutdent
+		shift
+		deb_list="$1"
+	done
+}
+
+pkg_remove() {
+	local pkg
+	for pkg in "$@"; do
+		if [ -f "${pkg}" ]; then
+			ebegin "Removing ${pkg}"
+			rm -f -- "${pkg}"
+			eend $?
+		else
+			ewarn "Cannot find ${pkg}"
+		fi
+	done
+}
+
+rm_pkglist() {
+	local deb_target="$1"
+	local deb_list="$2"
+	shift
+	while [[ -f "${deb_list}" ]]; do
+		einfo "Processing ${HILITE}$(basename "${deb_list}")${NORMAL}"
+		eindent
+		while read pkg; do
+			[[ -z "${pkg/##*/}" ]] && continue
+			for deb_file in $(match_deb "${deb_target}" "${pkg}"); do
+				pkg_remove "${deb_file}"
+			done
+		done <"${deb_list}"
+		eoutdent
+		shift
+		deb_list="$1"
+	done
+}
+
+pkg_clean() {
+	local species="$1"
+	case "${species}" in
+		clip-rm)
+			pkg_remove "${DEBS_BASE}/"{clip,rm}/*-conf{,-[bh]}_*.deb
+			;;
+		clip-gtw)
+			pkg_remove "${DEBS_BASE}/"gtw/clip-core-conf_*.deb
+			;;
+		clip-bare)
+			pkg_remove "${DEBS_BASE}/"bare/clip-core-conf_*.deb
+			;;
+		*)
+			usage "clean clip-rm|clip-gtw|clip-bare"
+			;;
+	esac
+}
+
+pkg_print() {
+	local pkg version name
+	for pkg in "${DEBS_BASE}/"{clip,rm}/*-conf{,-[bh]}_*.deb; do
+		[ -f "${pkg}" ] || continue
+		version="${pkg/%_i386.deb/}"
+		version="${version/#*_/}"
+		name="${pkg/_*_*.deb/}"
+		einfo "$(basename -- "${name}") ${version}"
+	done
+}
+
+pkglist_print() {
+	local pkglist
+	for name in "${PKGLIST_DIR}"/*_{clip,rm,gtw,bare}.conf; do
+		[ -f "${name}" ] || continue
+		echo "${name}" | sed -r 's,.*/(.*?)_(clip|rm|gtw|bare)\.conf,\1,'
+	done | sort -u | head -c -1
+}
+
+pkglist_forall() {
+	local func="$1"
+	local name="$2"
+	name="$(basename -- "${name}")"
+	local found=0
+	local pkglist
+	if [ -z "${name}" ]; then
+		eerror "No name specified"
+		return 1
+	fi
+	for distrib in "clip" "rm" "gtw" "bare"; do
+		pkglist="${PKGLIST_DIR}/${name}_${distrib}.conf"
+		if [ -e "${pkglist}" ]; then
+			found=1
+			"${func}" "${distrib}" "${pkglist}"
+		fi
+	done
+	if [ ${found} -eq 0 ]; then
+		eerror "No match for ${name}"
+		return 1
+	fi
+	return 0
+}
+
+pkg_purge() {
+	local target="$1"
+	if ! pkglist_forall rm_pkglist "${target}"; then
+		usage "purge $(pkglist_print | tr '\n' '|')"
+	fi
+}
+
+pkg_build() {
+	local target="$1"
+	local update="$2"
+	if ! pkglist_forall build_list "${target}"; then
+		usage "build[-update] $(pkglist_print | tr '\n' '|')"
+	fi
+}
+
+pkg_sync() {
+	if [ $# -ge 2 ]; then
+		deb_target="$1"
+		shift
+		for deb in "$@"; do
+			update_missing "${deb_target}" "$(readlink -f -- "${deb}")"
+		done
+	else
+		usage "sync $(find "${CLIP_PKG}/" -maxdepth 1 -mindepth 1 -type d \( -name '.svn' -prune -o -printf '%f|' \) | head -c -1) <files>..."
+	fi
+}
+
+
+case "$1" in
+	build)
+		pkg_build "$2"
+		;;
+	build-update)
+		BUILD_UPDATE="true"
+		pkg_build "$2"
+		;;
+	purge)
+		pkg_purge "$2"
+		;;
+	sync)
+		shift
+		pkg_sync "$@"
+		;;
+	clean)
+		pkg_clean "$2"
+		;;
+	ls)
+		pkg_print
+		;;
+	*)
+		usage
+	;;
+esac
+
+# clip-checksign -a *.deb | xargs clip-sign -a

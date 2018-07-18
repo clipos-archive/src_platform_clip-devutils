@@ -1,0 +1,496 @@
+#!/usr/bin/env bash
+# SPDX-License-Identifier: LGPL-2.1-or-later
+# Copyright © 2007-2018 ANSSI. All Rights Reserved.
+# -----------------------------------------------------------------------------
+# README
+# -----------------------------------------------------------------------------
+#
+# Initial setup to do before anything else is attempted:
+#
+# 1) Add your user name to the libvirt and kvm groups:
+#    $ usermod -aG libvirt,kvm,libvirt-qemu <username>
+# 2) Make the following changes to the libvirtd config (in /etc/libvirt/libvirtd.conf):
+#    | unix_sock_group = "libvirt"
+#    | unix_sock_ro_perms = "0770"
+#    | unix_sock_rw_perms = "0770"
+#    | auth_unix_rw = "none"
+# 3) Make the following changes to the QEMU config (in /etc/libvirt/qemu.conf):
+#    | user = "libvirt-qemu"
+#    | group = "libvirt-qemu"
+# 4) Restart libvirtd:
+#    $ systemctl restart libvirtd.service
+# 5) Add the 'clip' local virtual network:
+#    $ clip-virt add-virtual-network /SDK/usr/share/clip-devutils/tools/clip-virt-network.xml
+#
+# -----------------------------------------------------------------------------
+#
+# Example 1: Create a new virtual machine based on an already available and
+# installed version of CLIP
+#
+# 1) Get the base CLIP VM image disk from the mirror
+# 2) $ clip-virt instantiate-img clip-vm-stable_4.4.2-cc34-ca13-rc1-ra31_base.qcow2 test-vm-1.qcow2
+# 3) $ clip-virt instantiate-vm test-vm-1 test-vm-1.qcow2
+# 4) Use the `virt-manager` GUI or `virsh -c qemu:///system` to manage the new virtual machine
+#
+# -----------------------------------------------------------------------------
+#
+# Example 2 : Install a new virtual machine using an USB installer
+#
+# 1) Prepare a USB installer and plug it (into the host)
+# 2) $ clip-virt create-img clip-vm-stable_4.4.X-ccY-caZ-rcW-raV_base.qcow2
+# 3) $ clip-virt create-vm  clip-install-4.4.X clip-vm-stable_4.4.X-ccY-caZ-rcW-raV_base.qcow2
+# 4) Install CLIP and shutdown the system (do NOT reboot) in order to have a clean installed image
+# 5) $ clip-virt delete-vm clip-install-4.4.X
+# 4) $ clip-virt instantiate-img clip-vm-stable_4.4.X-ccY-caZ-rcW-raV_base.qcow2 test-vm-1.qcow2
+# 5) $ clip-virt instantiate-vm test-vm-1 test-vm.qcow2
+#
+# -----------------------------------------------------------------------------
+
+
+# Safe shell defaults
+LANG="C"
+LC_ALL="C"
+set -eu
+set -o pipefail
+#set -x  # debug only
+
+
+## Set various defaults used if options are not specified
+
+LIBVIRT_URL="qemu:///system"
+LIBVIRT_NETWORK_NAME="clip"
+
+QEMU_IMAGE_FORMAT="qcow2"
+QEMU_MEMORY="2048"
+# So far this is the mininmal size I was able to use whitout the installer
+# complaining about it.
+QEMU_IMAGE_SIZE="50G"
+## This is not the effective size taken on the disk as the file is sparsely
+## allocated. This requires a filesystem that support falloc.
+#QEMU_IMAGE_OPTIONS="preallocation=falloc"
+QEMU_IMAGE_OPTIONS="preallocation=off"
+
+# Variables for latter usage once the disk images are available on the network
+#BASE_IMAGE_URL="https://clip.ssi.gouv.fr/clip/clip-vm/"
+#BASE_IMAGE_VERSION="stable_4.4.2"
+#BASE_IMAGE_NAME="clip-vm-${BASE_IMAGE_VERSION}_base"
+#BASE_IMAGE_FILENAME="${BASE_IMAGE_NAME}.${QEMU_IMAGE_FORMAT}.xz"
+#BASE_IMAGE_FULL_URL="${BASE_IMAGE_URL}/${BASE_IMAGE_FILENAME}"
+
+BASENAME="$(basename -- "$0")"
+BASEDIR="$(dirname -- "$(readlink -f -- "$0")")"
+BASEPATH="$(readlink -f -- "$0")"
+
+# Script sub commands
+
+create_img() {
+    local image_filename="${1}"
+
+    if [[ -f "${image_filename}" ]]; then
+        printf "Image file '%s' already exist!\n" "${image_filename}"
+        exit 1
+    fi
+
+    qemu-img create -f "${QEMU_IMAGE_FORMAT}" -o "${QEMU_IMAGE_OPTIONS}" \
+        "${image_filename}" "${QEMU_IMAGE_SIZE}"
+}
+
+create_vm() {
+    EXTRA_ARGS=""
+    if [ "${1}" = "-g" ]; then
+        EXTRA_ARGS="--network network=clip,model=virtio \
+                    --network network=clip,model=virtio"
+        shift 1
+    fi
+
+    if [ $# -le 1 ]; then
+        echo "Wrong number of arguments"
+        usage_exit
+    fi
+
+    local vm_name="${1}"
+    local image_file="${2}"
+    local installer_file="${3:-unset}"
+
+    if [[ ! -f "${image_file}" ]]; then
+        printf "Image file '%s' does not exist!\n" "${image_file}"
+        exit 1
+    fi
+    VIRT_ARGS="--connect ${LIBVIRT_URL} \
+                -n ${vm_name} \
+                --memory ${QEMU_MEMORY} \
+                --vcpus 1 \
+                --cpu host \
+                --import \
+                --os-variant none \
+                --disk path=${image_file},format=${QEMU_IMAGE_FORMAT},cache=none,bus=virtio \
+                --graphics spice \
+                --noautoconsole \
+                --video cirrus \
+                --rng /dev/random \
+                --network network=clip,model=virtio \
+                $EXTRA_ARGS"
+
+
+    if [[ ! -f "${installer_file}" ]]; then
+        echo "Please plug-in a USB CLIP installer."
+        # QEMU (?) USB 3 support is missing/lacking thus using a USB 3 installer
+        # plugged in a USB 3 port will not work as of 2015-09-08.
+        echo "/!\\ WARNING /!\\: Do NOT use a USB 3 port! (A USB 3 device is fine)."
+        echo "Press <ENTER> to resume installation..."
+        read
+
+        echo "Please choose your USB installer from this list of USB devices:"
+        # This is an example USB vendor-product ID:
+        # usb_id="0x8564:0x1000" # 'Transcend Information, Inc. JetFlash'
+        local usb_id=""
+        local -a usb_device_list
+        # Filter devices that we obviously don't want to use
+        mapfile -t usb_device_list <<< "$(lsusb | grep -vE "(root hub|Mouse|Keyboard)")"
+        select usb_device in "${usb_device_list[@]}"; do
+            case "${usb_device}" in
+                *)
+                    local -a usb_id_array
+                    IFS=':' read -a usb_id_array <<< "$(printf "%s" "${usb_device}" | cut -d\  -f 6)"
+                    usb_id="0x${usb_id_array[0]}:0x${usb_id_array[1]}"
+                    break
+                    ;;
+            esac
+        done
+        VIRT_ARGS="$VIRT_ARGS --host-device ${usb_id},boot_order=1"
+    else
+        VIRT_ARGS="$VIRT_ARGS --disk path=${installer_file},format=raw,cache=none,bus=virtio,perms=sh,readonly=yes"
+    fi
+
+    virt-install $VIRT_ARGS
+    # We cannot use /dev/urandom here as the valid values are hardcoded
+    # inside libvirt (/dev/random & /dev/hwrng)
+}
+
+list_vm() {
+    virsh --connect "${LIBVIRT_URL}" list --all
+}
+
+console_vm() {
+    local vm_name="${1}"
+    virsh --connect "${LIBVIRT_URL}" console "${vm_name}"
+}
+
+viewer_vm() {
+    local vm_name="${1}"
+    virt-viewer --connect "${LIBVIRT_URL}" "${vm_name}"
+}
+
+start_vm() {
+    local vm_name="${1}"
+    virsh --connect "${LIBVIRT_URL}" start "${vm_name}"
+}
+
+stop_vm() {
+    local vm_name="${1}"
+    virsh --connect "${LIBVIRT_URL}" shutdown "${vm_name}"
+}
+
+destroy_vm() {
+    local vm_name="${1}"
+    virsh --connect "${LIBVIRT_URL}" destroy "${vm_name}"
+}
+
+delete_img() {
+    local image_filename="${1}"
+    rm -i -- "${image_filename}"
+}
+
+delete_vm() {
+    local vm_name="${1}"
+    virsh --connect "${LIBVIRT_URL}" destroy "${vm_name}" || true
+    virsh --connect "${LIBVIRT_URL}" undefine "${vm_name}"
+}
+
+instantiate_img() {
+    local base_image="${1}"
+    local new_image="${2}"
+
+    if [[ ! -f "${base_image}" ]]; then
+        printf "Image file '%s' does not exist!\n" "${base_image}"
+        exit 1
+    fi
+    if [[ -f "${new_image}" ]]; then
+        printf "Image file '%s' already exist!\n" "${new_image}"
+        exit 1
+    fi
+
+    qemu-img create -f "${QEMU_IMAGE_FORMAT}" -o "${QEMU_IMAGE_OPTIONS}" \
+        -b "${base_image}" "${new_image}" "${QEMU_IMAGE_SIZE}"
+}
+
+instantiate_vm() {
+    local vm_name="${1}"
+    local image_file="${2}"
+
+    if [[ ! -f "${image_file}" ]]; then
+        printf "Image file '%s' does not exist!\n" "${image_file}"
+        exit 1
+    fi
+
+    virt-install --connect "${LIBVIRT_URL}" \
+        -n "${vm_name}" \
+        --memory "${QEMU_MEMORY}" \
+        --vcpus 1 \
+        --cpu host \
+        --import \
+        --os-variant none \
+        --disk path="${image_file}",format="${QEMU_IMAGE_FORMAT}",cache=none,bus=virtio,boot_order=1 \
+        --graphics spice \
+        --noautoconsole \
+        --video cirrus \
+        --rng /dev/random \
+        --network network=clip,model=virtio
+}
+
+retrieve_image() {
+    exit 1
+    # TODO: Test that the file does not already exist!
+    #wget "${BASE_IMAGE_FULL_URL}"
+    # TODO: Test that the file does not already exist!
+    #xz -d "${IMAGE_FILE_XZ}"
+}
+
+config_libvirt_network() {
+    local libvirt_network_clip="${1}"
+
+    virsh --connect "${LIBVIRT_URL}" net-define "${libvirt_network_clip}"
+    virsh --connect "${LIBVIRT_URL}" net-autostart "${LIBVIRT_NETWORK_NAME}"
+    virsh --connect "${LIBVIRT_URL}" net-start "${LIBVIRT_NETWORK_NAME}"
+}
+
+usage() {
+    cat <<EOF
+Usage:
+
+${BASENAME} --help to get the README and examples
+
+libvirtd network configuration:
+${BASENAME} add-virtual-network .../clip-virt-network.xml
+
+To create a new CLIP VM image from a USB installer:
+${BASENAME} create-img       <image-filename>
+${BASENAME} create-vm        [-g] <vm-name> <image-filename> [<installer-img-filename>]
+
+To use an already installed CLIP VM image:
+${BASENAME} instantiate-img  <base-image> <new-image>
+${BASENAME} instantiate-vm   <vm-name> <image-filename>
+
+To deploy packages in a running  CLIP VM:
+${BASENAME} deploy-deb       <vm-name> <jail-name> <deb> [<deb>...]
+
+To compile and import packages with their dependencies in a running CLIP VM:
+${BASENAME} deploy-pkg <sdk-name> <vm-name> <jail-name> <pkg-name> [<pkg-name>...]
+
+To import packages in a running CLIP VM:
+${BASENAME} cp-to-vm <vm-name> <pkg-name> [<pkg-name>...] dest
+
+To export packages from a running CLIP VM:
+${BASENAME} cp-to-host <vm-name> dest <pkg-name> [<pkg-name>...]
+
+Generic:
+${BASENAME} list-vm
+${BASENAME} console-vm       <vm-name>
+${BASENAME} viewer-vm        <vm-name>
+${BASENAME} start-vm         <vm-name>
+${BASENAME} stop-vm          <vm-name>
+${BASENAME} destroy-vm       <vm-name>
+${BASENAME} delete-vm        <vm-name>
+${BASENAME} delete-img       <image-filename>
+EOF
+}
+
+usage_exit() {
+	usage
+	exit 1
+}
+
+readme() {
+	printf "\n\n"
+	# Remove the shebang and the first two comment characters
+	awk 'BEGIN { getline; getline; getline; while ($0 ~ "^#.*") { print substr($0, 3); getline } }' "${BASEPATH}"
+}
+
+
+# Main
+
+## We do not need to run as root
+if [[ ${EUID} -eq 0 ]]; then
+    echo "Do NOT run me as root"
+    echo "If any libvirt steps are failling, check the libvirtd configuration:"
+    printf "%s config\n" "${BASENAME}"
+    exit 1
+fi
+
+if [[ "${#}" -lt 1 ]]; then
+    usage_exit
+fi
+
+case "${1}" in
+    "--help"|"-h")
+        usage
+		readme
+		exit 0
+        ;;
+    "create-img")
+        if [[ "${#}" -ne 2 ]]; then
+            echo "create-img: Need exactly one filename."
+            usage_exit
+        fi
+        shift 1
+        create_img "${@}"
+        ;;
+    "create-vm")
+        if [[ "${#}" -lt 3 || "${#}" -gt 6 ]]; then
+			echo "create-vm: Need exactly one machine name and one image disk name. Clip installer image is optional. -g (gateway) argument is optional. "
+            usage_exit
+        fi
+        shift 1
+        create_vm "${@}"
+        ;;
+    "list-vm")
+        list_vm
+        ;;
+    "console-vm")
+        if [[ "${#}" -ne 2 ]]; then
+            echo "console-vm: Need exactly one machine name."
+            usage_exit
+        fi
+        shift 1
+        console_vm "${@}"
+        ;;
+    "viewer-vm")
+        if [[ "${#}" -ne 2 ]]; then
+            echo "viewer-vm: Need exactly one machine name."
+            usage_exit
+        fi
+        shift 1
+        viewer_vm "${@}"
+        ;;
+    "start-vm")
+        if [[ "${#}" -ne 2 ]]; then
+            echo "start-vm: Need exactly one machine name."
+            usage_exit
+        fi
+        shift 1
+        start_vm "${@}"
+        ;;
+    "stop-vm")
+        if [[ "${#}" -ne 2 ]]; then
+            echo "stop-vm: Need exactly one machine name."
+            usage_exit
+        fi
+        shift 1
+        stop_vm "${@}"
+        ;;
+    "destroy-vm")
+        if [[ "${#}" -ne 2 ]]; then
+            echo "destroy-vm: Need exactly one machine name."
+            usage_exit
+        fi
+        shift 1
+        destroy_vm "${@}"
+        ;;
+    "delete-img")
+        if [[ "${#}" -ne 2 ]]; then
+            echo "delete-img: Need exactly one filename."
+            usage_exit
+        fi
+        shift 1
+        delete_img "${@}"
+        ;;
+    "delete-vm")
+        if [[ "${#}" -ne 2 ]]; then
+            echo "delete-vm: Need exactly one machine name."
+            usage_exit
+        fi
+        shift 1
+        delete_vm "${@}"
+        ;;
+    "instantiate-img")
+        if [[ "${#}" -ne 3 ]]; then
+            echo "instantiate-img: Need exactly one base image name and one new image name."
+            usage_exit
+        fi
+        shift 1
+        instantiate_img "${@}"
+        ;;
+    "instantiate-vm")
+        if [[ "${#}" -ne 3 ]]; then
+            echo "instantiate-vm: Need exactly one image name and one machine name."
+            usage_exit
+        fi
+        shift 1
+        instantiate_vm "${@}"
+        ;;
+    "add-virtual-network")
+        if [[ "${#}" -ne 2 ]]; then
+            echo "add-virtual-network: Need exactly one network template file (clip-vm-network.xml)."
+            usage_exit
+        fi
+        shift 1
+        config_libvirt_network "${@}"
+        ;;
+    "deploy-deb")
+        if [[ "${#}" -le 3 ]]; then
+            echo "deploy-deb: Need at least 3 arguments."
+            usage_exit
+        fi
+        shift 1
+        [ -x "${BASEDIR}/modules/deploy-deb-serial" ] ||\
+              ( echo "the command is not installed " >&2; exit 1)
+        "${BASEDIR}/modules/deploy-deb-serial" "${@}"
+        ;;
+    "deploy-pkg")
+        if [[ "${#}" -le 4 ]]; then
+            printf "deploy-pkg: Need at least 4 arguments.\n"
+            usage_exit
+        fi
+        rep="$(dirname "$(readlink -f -- "$0")")"
+        shift 1
+        [ -x "${rep}/modules/deploy-with-dep" ] ||\
+              ( echo "the command is not installed " >&2; exit 1)
+        "${rep}/modules/deploy-with-dep" "${@}"
+        ;;
+    "cp-to-vm")
+        if [[ "${#}" -le 3 ]]; then
+            printf "cp-to-vm: Need at least 3 arguments.\n"
+            usage_exit
+        fi
+        rep="$(dirname "$(readlink -f -- "$0")")"
+        shift 1
+        [ -x "${rep}/modules/cp-to-vm" ] ||\
+              ( echo "the command is not installed " >&2; exit 1)
+        "${rep}/modules/cp-to-vm" "${@}"
+        ;;
+    "sh-to-vm")
+        if [[ "${#}" -le 1 ]]; then
+            printf "cp-to-vm: Need at least 1 argument.\n"
+            usage_exit
+        fi
+        rep="$(dirname "$(readlink -f -- "$0")")"
+        shift 1
+        [ -x "${rep}/modules/sh-to-vm" ] ||\
+              ( echo "the command is not installed " >&2; exit 1)
+        "${rep}/modules/sh-to-vm" "${@}"
+        ;;
+    "cp-to-host")
+        if [[ "${#}" -le 3 ]]; then
+            printf "cp-to-host: Need at least 3 arguments.\n"
+            usage_exit
+        fi
+        rep="$(dirname "$(readlink -f -- "$0")")"
+        shift 1
+        [ -x "${rep}/modules/cp-to-host" ] ||\
+              ( echo "the command is not installed " >&2; exit 1)
+        "${rep}/modules/cp-to-host" "${@}"
+        ;;
+    *)
+        echo "No command or wrong command specified."
+        usage_exit
+esac

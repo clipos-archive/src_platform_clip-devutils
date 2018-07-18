@@ -1,0 +1,57 @@
+#!/usr/bin/perl
+# SPDX-License-Identifier: LGPL-2.1-or-later
+# Copyright © 2007-2018 ANSSI. All Rights Reserved.
+
+#
+#  clip-checkpkg - Binary package QA checks
+#  Copyright (C) 2010-2011 SGDSN/ANSSI
+#  Author: Vincent Strubel <clipos@ssi.gouv.fr>
+#
+#  All rights reserved.
+#
+
+use strict;
+use warnings;
+use CLIP::Logger ':all';
+use CLIP::Pkg::QA ':all';
+
+my $g_fullcheck = 0;
+
+sub usage($) {
+	my $out = shift;
+	my $progname = $0;
+	$progname =~ s:.*\/::;
+	
+	print $out <<ENDHELP;
+	
+$progname : check that the paths of a package's files are correct for 
+that package's distribution and priority.
+
+Usage: $progname <pkg>.deb
+
+ENDHELP
+}
+
+######################### MAIN ################################
+
+$g_log_prefix = "clip-checkpkg";
+$g_log_syslog = 0;
+$g_log_debug = 0;
+
+my $pkg = $ARGV[0];
+die "Usage: clip-checkpkg <pkg>.deb\n" unless (defined($pkg));
+my $arch;
+if ($pkg =~ /_([^_]+)\.deb$/) {
+	$arch = $1;
+} else {
+	die "cannot extract arch from package name: ".(basename $pkg)."\n";
+}
+
+my $prio = clippkg_get_prio($pkg);
+my $dist = clippkg_get_dist($pkg);
+
+clippkg_check_paths($pkg, $dist, $prio) 
+	or die "Package $pkg has incorrect paths.\n";
+
+print "Package $pkg: OK\n"
+

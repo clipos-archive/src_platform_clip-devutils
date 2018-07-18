@@ -1,0 +1,140 @@
+#!/usr/bin/env bash
+# SPDX-License-Identifier: LGPL-2.1-or-later
+# Copyright © 2007-2018 ANSSI. All Rights Reserved.
+
+# Safe shell defaults
+# export LANG="C.UTF-8"
+# export LC_ALL="C.UTF-8"
+set -eu
+set -o pipefail
+# Force debug output
+set -x
+
+# This is an helper script to help generate patches for the CLIP kernel.
+# It must be run inside the linux-vserver git repository.
+#
+# This script will create a folder with quilt compatible patches and metadata
+# files.
+
+if [[ "${#}" -ne 7 ]]; then
+	printf "Usage: %s <linux-stable-tag> <grsec-commit> <vserver-merge-commit> <last-clip-patches-commit> <last-clsm-commit> <last-kccsd-commit> <kernel-version>\n" "$(basename "${0}")"
+	exit 1
+fi
+
+PATCHES_GRSEC_START="${1}"
+PATCHES_GRSEC_END="${2}"
+
+PATCHES_VSERVER_START="${2}"
+PATCHES_VSERVER_END="${3}"
+
+PATCHES_CLIP_START="${3}"
+PATCHES_CLIP_END="${4}"
+
+PATCHES_CLSM_START="${4}"
+PATCHES_CLSM_END="${5}"
+
+PATCHES_KCCSD_START="${5}"
+PATCHES_KCCSD_END="${6}"
+
+KERNEL_VERSION="${7}"
+
+# TODO: Properly handle grsecurity and vserver special cases
+rm -rf ./patches
+mkdir patches
+pushd patches
+
+cat > 0000_COMMAND <<EOF
+$(basename "${0}") $@
+EOF
+
+cat > 0000_README <<EOF
+README
+------
+
+This is the patchset for the ${KERNEL_VERSION} clip-kernel.
+
+It follows the same conventions as gentoo-sources's genpatch, and incorporates
+some of the unipatches from there.
+
+Patchset Numbering Scheme
+-------------------------
+
+FIXES
+1000-1400       linux-stable
+1400-1500       linux-stable queue
+1500-1700       security
+1500-1600       security features
+1600-1700       security fixes
+1700-1800       architecture-related
+1800-1900       mm/scheduling/misc
+1900-2000       filesystems
+2000-2100       networking core
+2100-2200       storage core
+2200-2300       power management (ACPI, APM)
+2300-2400       bus (USB, IEEE1394, PCI, PCMCIA, ...)
+2400-2500       network drivers
+2500-2600       storage drivers
+2600-2700       input
+2700-2900       media (graphics, sound, tv)
+2900-3000       other
+3000-4000       reserved
+
+FEATURES
+4000-4100       network
+4100-4200       storage
+4200-4300       graphics
+4300-4400       filesystem
+4400-4500       other
+
+Individual Patch Descriptions:
+------------------------------
+EOF
+
+# grsecurity special case
+cat >> 0000_README <<EOF
+
+Patch:  1500_grsec_3.1-${KERNEL_VERSION}.patch
+From:   https://grsecurity.net
+Desc:   Latest grsecurty patch: grsec-3.1-${KERNEL_VERSION}
+EOF
+
+cat > series <<EOF
+1500_grsec_3.1-${KERNEL_VERSION}.patch
+EOF
+
+git diff "${PATCHES_GRSEC_START}" "${PATCHES_GRSEC_END}" > "1500_grsec_3.1-${KERNEL_VERSION}.patch"
+
+# server special case
+cat >> 0000_README <<EOF
+
+Patch:  1501_vserver-vs2.3.8.4-anssi.patch
+From:   http://linux-vserver.org
+Desc:   Vserver patch, ported from the 4.1.18-vs2.3.84 version, fixed to apply
+        on a grsecurity patched kernel.
+EOF
+
+cat >> series <<EOF
+1501_vserver-vs2.3.8.4-anssi.patch
+EOF
+
+git diff "${PATCHES_VSERVER_START}" "${PATCHES_VSERVER_END}" > "1501_vserver-vs2.3.8.4-anssi.patch"
+
+# clip-patches case
+mapfile -t REVISION_LIST <<< "$(git log --reverse --format=format:"%H" "${PATCHES_CLIP_START}..${PATCHES_CLIP_END}")"
+
+for r in "${!REVISION_LIST[@]}"; do
+	PATCH_NAME="$(git log -n 1 --format=format:"%s%n%n%b" "${REVISION_LIST[r]}" | grep "Patch:" | cut -d\  -f 3)"
+	printf "%s\n" "${PATCH_NAME}" >> series
+	git show "${REVISION_LIST[r]}" > "${PATCH_NAME}"
+	PATCH_INFO_LINE="$(git log -n 1 --format=format:"%s%n%n%b" "${REVISION_LIST[r]}" | grep -n "Patch:" | cut -d: -f 1)"
+	printf "\n" >> 0000_README
+	git log -n 1 --format=format:"%s%n%n%b" "${REVISION_LIST[r]}" | tail -n+"${PATCH_INFO_LINE}" >> 0000_README
+done
+
+# clsm case
+git diff "${PATCHES_CLSM_START}" "${PATCHES_CLSM_END}" > "clsm.patch"
+
+# kccsd case
+git diff "${PATCHES_KCCSD_START}" "${PATCHES_KCCSD_END}" > "kccsd.patch"
+
+exit 0

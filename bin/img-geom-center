@@ -1,0 +1,46 @@
+#!/bin/sh
+# SPDX-License-Identifier: LGPL-2.1-or-later
+# Copyright © 2007-2018 ANSSI. All Rights Reserved.
+# 
+# Convert image into multiple custom geometries.
+# Copyright 2011 ANSSI
+# Author: Mickaël Salaün <clipos@ssi.gouv.fr>
+#
+# All rights reserved
+# Distributed under the terms of the GNU Lesser General Public License v2.1
+
+set -e
+
+usage() {
+	echo "$0: <file> <dir> <background> <geometry> [geometry] ..." >/dev/stderr
+	exit 1
+}
+
+if [ $# -lt 4 ]; then
+	usage
+fi
+
+regeom() {
+	local fin="$1"
+	local dir="$2"
+	local color="$3"
+	local geom="$4"
+	local fout="${dir}/${geom}.${fin/#*./}"
+	if [ ! -d "${dir}" ]; then
+		mkdir -p -- "${dir}" || exit 1
+	fi
+	if [ -e "${fout}" ]; then
+		echo "File ${fout} already exist!" >/dev/stderr
+		return 1
+	fi
+	echo "Converting ${fin} -> ${fout}"
+	convert "${fin}" -resize "${geom}>" -background "${color}" -gravity center -extent "${geom}" "${fout}"
+}
+
+FILE="$1"
+OUTDIR="$2"
+BGCOLOR="$3"
+shift 3
+for geom in "$@"; do
+	regeom "${FILE}" "${OUTDIR}" "${BGCOLOR}" "${geom}" || exit 1
+done

@@ -1,0 +1,185 @@
+#! /bin/sh
+# SPDX-License-Identifier: LGPL-2.1-or-later
+# Copyright © 2007-2018 ANSSI. All Rights Reserved.
+set -e
+
+. /etc/clip-build.conf
+ROOTFS=${ROOTFS:-/opt/clip-sdk/rootfs}
+EMERGE_OPTS="--verbose --quiet --update"
+export LANG=fr_FR.UTF-8
+
+if [[ -z "${CLIP_BASE}" ]] ; then
+	echo "CLIP_BASE must be defined and contain the path to the portage trees." > /dev/stderr
+	exit 1
+fi
+if [[ -z "${CLIP_ARCH}" ]] ; then
+	echo "CLIP_ARCH must be defined and contain the current/target architecture." > /dev/stderr
+	exit 1
+fi
+
+
+prepare()
+{
+	echo "[*] Preparing host"
+	emerge $EMERGE_OPTS --newuse --deep --with-bdeps=y --keep-going=y @world
+	emerge $EMERGE_OPTS --depclean --deep
+	revdep-rebuild --ignore
+	lafilefixer --justfixit
+	etc-update
+}
+
+clean()
+{
+	echo "[*] Cleaning target folder"
+	grep -q ${ROOTFS} /proc/mounts && exit -1
+	rm -rf ${ROOTFS}
+}
+
+case $1 in
+	prepare)
+		prepare
+		;;
+	clean)
+		clean
+		exit 0
+		;;
+esac
+
+# Fail if target folder already exists
+echo "[*] Creating target folder"
+mkdir ${ROOTFS} || exit -1
+
+echo "[*] Preparing config"
+mkdir -p ${ROOTFS}/etc/portage
+ln -s ${CLIP_BASE}/portage-overlay-clip/profiles/clip-dev/${CLIP_ARCH} ${ROOTFS}/etc/portage/make.profile
+
+for var in CLIP_BASE PORTDIR PORTDIR_OVERLAY DISTDIR MAKEOPTS ACCEPT_KEYWORDS;
+do
+	grep "${var}=" /etc/make.conf || true
+done > ${ROOTFS}/etc/make.conf
+
+if [ "${CLIP_ARCH}" == amd64 ]; then
+	echo USE="-ccsd" >> ${ROOTFS}/etc/make.conf
+	mkdir -p ${ROOTFS}/usr
+	ln -s lib64 ${ROOTFS}/lib
+	ln -s lib64 ${ROOTFS}/usr/lib
+fi
+
+echo Europe/Paris > ${ROOTFS}/etc/timezone
+
+echo "[*] Preparing symlinks in /usr/local"
+mkdir -p ${ROOTFS}/usr/local
+for dir in include kde lib qt share;
+do
+	ln -fs /usr/${dir} ${ROOTFS}/usr/local/
+	if [ "${CLIP_ARCH}" == amd64 ]; then
+		ln -fs /usr/lib64 ${ROOTFS}/usr/local/
+	fi
+done
+
+echo "[*] Bootstraping minimal system"
+pkgs="
+	app-arch/tar
+	app-arch/gzip
+	dev-libs/mpc
+	sys-apps/findutils
+	sys-apps/grep
+	sys-apps/gawk
+	sys-apps/openrc
+	sys-apps/util-linux
+	sys-apps/sed
+	sys-apps/shadow
+	sys-apps/texinfo
+	sys-apps/tcb
+	sys-devel/binutils
+	sys-devel/bison
+	sys-devel/gcc
+	sys-devel/make
+	sys-devel/patch
+	sys-kernel/linux-headers
+	"
+
+# Don't enable too much stuff at this point
+USE="-X -xorg -opengl
+	-kerberos -dbus -cups
+	-sqlite
+	-glib -gtk -cairo
+	-qt -qt4 -kde
+	-tk
+	-jpeg -png -svg -java
+	-zlib
+	clip-sdk-bootstrap"
+
+# Split glibc, baselayout-sdk and tcb since they really need clip-devstation
+USE=${USE} emerge ${EMERGE_OPTS} --oneshot --root-deps=rdeps \
+	--config-root=${ROOTFS} --root=${ROOTFS} \
+	sys-libs/glibc clip-layout/baselayout-sdk sys-apps/tcb
+USE="${USE} -clip-devstation" emerge ${EMERGE_OPTS} --oneshot --root-deps=rdeps \
+	--config-root=${ROOTFS} --root=${ROOTFS} $pkgs
+
+if [[ ! "${CLIP_ARCH}" == "armel" ]] ; then
+	echo "[*] Installing icedtea-bin to ease bootstraping"
+	USE="${USE}" emerge ${EMERGE_OPTS} --oneshot --root=${ROOTFS} dev-java/icedtea-bin
+fi
+
+echo "[*] Setup mount points inside the chroot"
+mkdir -p ${ROOTFS}/proc
+mkdir -p ${ROOTFS}/root
+mkdir -p ${ROOTFS}/home
+mkdir -p ${ROOTFS}/dev
+mkdir -p ${ROOTFS}/opt/clip-int
+
+echo "[*] Preparing postinst script"
+cat << EOF > ${ROOTFS}/root/postinst.sh
+#!/bin/sh
+
+set -e
+
+EMERGE_OPTS="${EMERGE_OPTS}"
+
+# Setup env
+echo "	[+] Preparing environment"
+[ -z "\$HOME" ] && export HOME=/root
+[ -z "\$TERM" ] && export TERM=xterm
+eselect python update
+env-update
+locale-gen
+
+# It seems to be a good idea to first rebuild libtool
+echo "	[+] Building libtool"
+emerge --verbose --quiet --oneshot sys-devel/libtool
+echo "	[+] Emerging @system"
+emerge \$EMERGE_OPTS --empty --deep @system
+
+echo "	[+] Re-Building some packages with full USE flags"
+emerge --verbose --quiet --oneshot sys-devel/libtool sys-apps/tcb sys-libs/e2fsprogs-libs
+echo "	[+] Re-Building @system with full USE flags"
+emerge \$EMERGE_OPTS --newuse --deep --with-bdeps=y @system
+
+echo "	[+] Installing clip-devstation"
+emerge \$EMERGE_OPTS --newuse --deep --with-bdeps=y virtual/clip-devstation
+
+echo "	[+] Installing icedtea"
+emerge \$EMERGE_OPTS --newuse --deep --with-bdeps=y dev-java/icedtea
+
+echo "	[+] cleanup kernel"
+emerge -C sys-kernel/clip-kernel
+
+echo "	[+] Post-configuration"
+eselect java-vm set system icedtea-7
+eselect vi update
+source /etc/profile
+env-update
+etc-update --automode -5 /etc/make.conf
+
+echo "	[+] done."
+EOF
+
+chmod 755 ${ROOTFS}/root/postinst.sh
+
+echo "[*] Executing postinst script"
+/opt/clip-livecd/enter-loop.sh -s ${ROOTFS} /root/postinst.sh
+
+rm "${ROOTFS}/root/postinst.sh"
+
+echo "[*] Done."

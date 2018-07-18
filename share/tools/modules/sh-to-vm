@@ -1,0 +1,53 @@
+#!/usr/bin/perl
+# SPDX-License-Identifier: LGPL-2.1-or-later
+# Copyright © 2007-2018 ANSSI. All Rights Reserved.
+use lib __FILE__=~s/(.*)\/.*$/\1/r;
+require Sys::Virt or die 'Install libsys-virt-perl';
+require Term::ANSIColor or die 'Install libansicolor-perl';
+
+use clipvirt;
+$domain=shift;
+my $connection=clipvirt->new();
+$SIG{'INT'} = sub {$connection->{port}->finish() if $connection->{port};
+                        print "AAAAAAAAAAAAAH got killed"; exit(0);};
+#$connection->{noerrorlog}=1;
+
+
+if(@ARGV)
+{
+   $connection->get_console($domain);
+   print $connection->send_command("@ARGV")=~s/(.*\n).*?$/\1/sr;
+}
+else
+{
+
+    my $vmm=Sys::Virt->new(uri=>"qemu:///system");
+    $dom=$vmm->get_domain_by_name($domain)
+            or die "cannot bind to domain $domain";
+    $dom->get_xml_description()=~/<console type='pty' tty='(.*?)'>/;
+    exec "/usr/bin/minicom" ,"-p", "$1";
+    print($connection->send_command($_)) while(<>);
+}
+
+# close console connection
+$connection->{console}->finish();
+
+
+=pod
+
+=head1 NAME
+
+sh-to-vm
+
+=head1 SYNOPSIS
+
+sh-to-vm C<VM name*> [command]
+
+=head1 DESCRIPTION
+
+This program executes a shell from an host to a  virtual
+machines managed by C<libvirt>.
+
+=cut
+
+

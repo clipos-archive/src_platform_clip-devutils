@@ -1,0 +1,50 @@
+=============
+vizmounts.py
+Hugo Chargois
+2014-11-17
+=============
+
+Permet de visualiser un arbre des points de montage d'un système de fichiers
+à partir de ses fichiers fstab. La sortie est un graphe au format DOT pouvant
+être transformé en image grâce au logiciel du même nom de la suite GraphViz.
+
+Exemples:
+
+ * Pour se familiariser avec le format du graph, on peut commencer par
+   générer la légende seulement :
+
+   $ vizmounts.py --legend | dot -Tpng > graph.png
+
+ * Générer un graphe à partir du fstab du système courant (à partir de
+   maintenant, on n'inclut plus la légende) :
+
+   $ vizmounts.py --fstab /etc/fstab | dot -Tpng > graph.png
+
+ * Ou du mtab !
+
+   $ vizmounts.py --fstab /etc/mtab | dot -Tpng > graph.png
+
+ * Génération d'un graphe pour un système qui possède un socle et une cage
+   nommée "audit" :
+
+   $ vizmounts.py \
+         --fstab socle.fstab \
+         --fstab audit.fstab audit \
+         | dot -Tpng > graph.png
+
+ * Génération d'un graphe pour un système qui possède un socle et deux cages
+   nommées "rm_h" et "rm_b" avec chacune un fstab "internal" et un "external" :
+
+   $ vizmounts.py \
+         --fstab socle.fstab \
+         --fstab rm_h.fstab.internal rm_h internal \
+         --fstab rm_h.fstab.external rm_h \
+         --fstab rm_b.fstab.internal rm_b internal \
+         --fstab rm_b.fstab.external rm_b \
+         | dot -Tpng > graph.png
+
+ * Pour remplacer les couleurs par défaut dans la commande précédente
+   (noir pour le socle, rouge pour la première cage, bleu pour la seconde)
+   par du bleu, du vert et du violet par exemple, on peut utiliser l'option
+   "--colors blue darkgreen darkviolet"
+   Voir la documentation de GraphViz pour les couleurs possibles.

@@ -1,0 +1,142 @@
+#!/bin/sh
+# SPDX-License-Identifier: LGPL-2.1-or-later
+# Copyright © 2007-2018 ANSSI. All Rights Reserved.
+#
+#  clip-vcs - Clip VCS helper
+#  Copyright (C) 2012 ANSSI
+#  Author: Mickaël Salaün <clipos@ssi.gouv.fr>
+#
+#  All rights reserved.
+#
+
+source "/lib/rc/sh/functions.sh"
+source "/etc/clip-build.conf"
+set -e
+
+# One day, Git will come!
+alias vcs_get_delta=svn_get_delta
+alias vcs_merge_delta=svn_merge_delta
+
+svn_get_delta() {
+	local vcs_branch="$1"
+	local vcs_rev_remote="$2"
+	local vcs_rev_local
+	local vcs_path="${3:-.}"
+	vcs_rev_local="$(LC_ALL=C svn info "${vcs_path}" 2> /dev/null | awk --posix '/Last Changed Rev: [0-9]{1,}/ { print $4 }')"
+	[ -n "${vcs_rev_local}" ] || vcs_rev_local=0
+	svn log -r "${vcs_rev_local}:${vcs_rev_remote}" "${vcs_branch}" "${vcs_path}" | awk --posix '
+/^-{72}$/ {
+	getline
+	if ($1 ~ /^r[0-9]{1,}$/) {
+		print $1
+	}
+}
+'
+}
+
+vcs_get_delta_multi() {
+	local vcs_branch="$1"
+	local vcs_rev="$2"
+	shift 2
+	local vcs_path
+	for vcs_path in "$@"; do
+		vcs_get_delta "${vcs_branch}" "${vcs_rev}" "${vcs_path}"
+	done | sort -Vu
+}
+
+svn_merge_delta() {
+	local vcs_branch="$1"
+	shift
+	local vcs_rev
+	local ret=0
+	vcs_get_delta_multi "${vcs_branch}" "$@" | while read vcs_rev; do
+		einfo "Merging ${vcs_branch}:${vcs_rev}"
+		vcs_rev="${vcs_rev##r}"
+		vcs_rev="r$((vcs_rev - 1)):r${vcs_rev}"
+		svn merge -r "${vcs_rev}" "${vcs_branch}" || ret=1
+		[ ${ret} -eq 0 ] || return ${ret}
+	done
+}
+
+conf_list_last() {
+	# TODO: conf_list_last [-r <vcs-revision>] [<prefix>]
+	local virtual
+	if [[ "$1" = "-v" ]]; then
+		virtual="y"
+		shift
+	fi
+	local prefix="$(basename -- "$1")"
+	local f conf version rev=0 rev_num=0
+	for f in "${CLIP_BASE}/portage-overlay-clip/clip-conf/${prefix}"*; do
+		[[ -d "$f" ]] || continue
+		conf="$(ls -rv -- "$f/${prefix}"*.ebuild | head -n 1)"
+		[[ -f "${conf}" ]] || continue
+		version="$(basename -- "${conf/%.ebuild}")"
+		rev_num="${version##*-r}"
+
+		if [[ "${rev_num}" != "${version}" ]]; then
+			rev="$((rev + rev_num))"
+		fi
+		echo "${version}"
+	done
+	if [[ -n "${virtual}" ]]; then
+		version="${version/%-r*}"
+		[[ -n "${version}" ]] && echo "virtual-${version##*-}.${rev}"
+	fi
+}
+
+lastchanges() {
+	# Read a SVN log file from stdin or argv[1] and show Clip related changelogs
+	local logfile="$1"
+	local logline ename efile
+	local length=30
+
+	if [[ -n "${logfile}" ]]; then
+		cat -- "${logfile}"
+	else
+		while read logline; do
+			echo "${logline}"
+		done
+	fi | while read logline; do
+		echo "${logline}" | sed -nr 's/[ADUq ]{2} {3}(portage-overlay\/(.*)\/ClipChangeLog|portage-overlay-clip\/(.*)\/ChangeLog)$/\2\3 \1/p' |
+			while read ename efile; do
+				echo -e "\e[36;1m${ename}\e[0m"
+				head -n "${length}" -- "${CLIP_BASE}/${efile}"
+				#svn_path="${CLIP_BASE}/${file}"
+				#pushd "$(dirname -- "${svn_path}")" >/dev/null
+				#svn diff -r "$(svnversion)" -- "${svn_path}"
+				#popd >/dev/null
+				echo
+			done
+	done | less -R
+}
+
+MYSELF="$(basename -- "$0")"
+
+usage() {
+	echo "usage: ${MYSELF} { merge <path>... | version [-v] [prefix] | change [<] [svn-log]}" >&2
+	echo "environment: VCS_REVISION=${VCS_REVISION} VCS_BRANCH=${VCS_BRANCH}" >&2
+	exit 1
+}
+
+CMD="$1"
+shift || true
+VCS_BRANCH="${VCS_BRANCH:-^/branches/clip4}"
+VCS_REVISION="${VCS_REVISION:-HEAD}"
+
+case "${CMD}" in
+	merge)
+		[ "$#" -lt 1 ] && usage
+		# TODO: clip-vcs merge -t <ticket>
+		vcs_merge_delta "${VCS_BRANCH}" "${VCS_REVISION}" "$@"
+		;;
+	version)
+		conf_list_last "$@"
+		;;
+	change)
+		lastchanges "$@"
+		;;
+	*)
+		usage
+		;;
+esac

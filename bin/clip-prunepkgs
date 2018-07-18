@@ -1,0 +1,129 @@
+#!/usr/bin/perl
+# SPDX-License-Identifier: LGPL-2.1-or-later
+# Copyright © 2007-2018 ANSSI. All Rights Reserved.
+
+#
+#  clip-prunepkgs - remove all obsolete packages from
+#  current directory (i.e. all packages for which a newer
+#  version exists in the current directory).
+#  Copyright (C) 2009 SGDN/DCSSI
+#  Copyright (C) 2010 ANSSI
+#  Author: Vincent Strubel <clipos@ssi.gouv.fr>
+#
+#  All rights reserved.
+#
+
+use strict;
+use warnings;
+use Sort::Versions;
+use Getopt::Long;
+
+my %versions = ();
+my $g_pretend = 0;
+my $g_interactive = 0;
+my $g_ask = 0;
+
+sub usage($) {
+	my $out = shift;
+	my $progname = $0;
+	$progname =~ s:.*\/::;
+	
+	print $out <<ENDHELP;
+	
+$progname : remove all obsolete packages from the current directory.
+
+Usage: $progname [options]
+  with the following supported options: 
+    -a : print what would be removed, then ask for confirmation before removing.
+    -i : ask for confirmation for each removal.
+    -p : only print what would be removed.
+
+ENDHELP
+}
+
+sub confirm();
+
+sub confirm() {
+	print "Confirm (y/n) ?\n";
+	my $a = <STDIN>;
+	chomp $a;
+	my $ua = uc $a;
+	return 0 if (($ua eq "N") or ($ua eq "NO"));
+	return 1 if (($ua eq "Y") or ($ua eq "YES"));
+
+	print "Unsupported answer: $a\n";
+	return confirm();
+}
+
+sub do_remove($) {
+	my $p = shift;
+	print "Removing $p... ";
+	return 1 if ($g_interactive and not confirm);
+	if (unlink "$p") {
+		print "  ok\n";
+	} else {
+		print STDERR "  failed to remove $p\n";
+	}
+}
+
+######################### MAIN ################################
+
+eval {
+	GetOptions (
+		'a'		=>	\$g_ask,
+		'i'		=>	\$g_interactive,
+		'p'		=>	\$g_pretend,
+		'help'		=>	sub {usage(*STDOUT{IO}); exit 0},
+	) or die 1;
+};
+
+if ($@) {
+	usage(*STDERR{IO});
+	die "Wrong options, aborting";
+}
+
+my @debs = <*.deb>;
+
+foreach my $deb (@debs) {
+	if ($deb =~ /^([^_]+)_([^_]+)_([^_.]+)/) {
+		my $pname = $1;
+		my $pver = $2;
+		my $parch = $3;
+
+		if (defined($versions{$pname . ":" . $parch})) {
+			push @{$versions{$pname . ":" . $parch}}, ($pver);
+		} else {
+			$versions{$pname . ":" . $parch} = [ $pver ];
+		}
+	} else {
+		print STDERR "cannot extract version for package $deb\n";
+	}
+}
+
+my @dups = ();
+
+foreach my $pnamearch (keys %versions) {
+	my $lref = $versions{$pnamearch};
+	my @slist = sort versioncmp @{$lref};
+	# he he, try to do this in any other language :)
+	my ($pname, $parch) = split(/:/, $pnamearch);
+	push @dups, (map {"$pname"."_"."$_"."_".$parch.".deb"} @slist[0 .. $#slist - 1]) if ($#slist);
+}
+
+unless ($#dups >= 0) {
+	print "No obsolete packages found.\n";
+	exit 0;
+}
+
+if ($g_pretend or $g_ask) {
+	foreach (@dups) {
+		print "To be removed: $_.\n";
+	}
+}
+exit 0 if ($g_pretend);
+
+exit 0 if ($g_ask and not confirm());
+
+foreach (@dups) {
+	do_remove($_);
+}
