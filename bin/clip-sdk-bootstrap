@@ -6,7 +6,7 @@ set -e
 . /etc/clip-build.conf
 ROOTFS=${ROOTFS:-/opt/clip-sdk/rootfs}
 EMERGE_OPTS="--verbose --quiet --update"
-export LANG=fr_FR.UTF-8
+export LANG=C
 
 if [[ -z "${CLIP_BASE}" ]] ; then
 	echo "CLIP_BASE must be defined and contain the path to the portage trees." > /dev/stderr
@@ -108,11 +108,13 @@ USE="-X -xorg -opengl
 	-tk
 	-jpeg -png -svg -java
 	-zlib
+	-pie
 	clip-sdk-bootstrap"
 
 # Split glibc, baselayout-sdk and tcb since they really need clip-devstation
-USE=${USE} emerge ${EMERGE_OPTS} --oneshot --root-deps=rdeps \
+USE="${USE}" emerge ${EMERGE_OPTS} --oneshot --root-deps=rdeps \
 	--config-root=${ROOTFS} --root=${ROOTFS} \
+	app-shells/bash app-portage/gentoolkit net-libs/libtirpc \
 	sys-libs/glibc clip-layout/baselayout-sdk sys-apps/tcb
 USE="${USE} -clip-devstation" emerge ${EMERGE_OPTS} --oneshot --root-deps=rdeps \
 	--config-root=${ROOTFS} --root=${ROOTFS} $pkgs
@@ -160,7 +162,10 @@ echo "	[+] Installing clip-devstation"
 emerge \$EMERGE_OPTS --newuse --deep --with-bdeps=y virtual/clip-devstation
 
 echo "	[+] Installing icedtea"
-emerge \$EMERGE_OPTS --newuse --deep --with-bdeps=y dev-java/icedtea
+emerge \$EMERGE_OPTS --newuse --deep --with-bdeps=y net-misc/wget dev-java/icedtea
+
+echo "	[+] Installing Vim"
+emerge \$EMERGE_OPTS app-editors/vim
 
 echo "	[+] cleanup kernel"
 emerge -C sys-kernel/clip-kernel
