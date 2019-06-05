@@ -160,12 +160,9 @@ chmod 755 ${ROOTFS}/root/postinst.sh
 
 # Regenerate make.conf/make.profile for use inside the chrooted livecd environment (portage tree in /opt/clip-int)
 cat > "${ROOTFS}/etc/make.conf" <<EOF
-PORTDIR="/opt/clip-int/portage"
-PORTDIR_OVERLAY="/opt/clip-int/portage-overlay-dev /opt/clip-int/portage-overlay /opt/clip-int/portage-overlay-clip /opt/clip-int/portage-overlay-extra-dev /opt/clip-int/portage-overlay /opt/clip-int/portage-overlay-extra"
-GENTOO_MIRRORS="file:///opt/clip-int/distfiles-dev file:///opt/clip-int/distfiles file:///opt/clip-int/distfiles-extra-dev files:///opt/clip-int/distfiles-extra"
-FETCHCOMMAND="/usr/lib/portage/bin/clip-fetch \\\${URI} \\\${DISTDIR}/\\\${FILE}"
-RESUMECOMMAND="/usr/lib/portage/bin/clip-fetch \\\${URI} \\\${DISTDIR}/\\\${FILE}"
-DISTDIR=/tmp/distfiles-dev
+PORTDIR="${CLIP_BASE}/portage"
+PORTDIR_OVERLAY="/opt/clip-int/portage-overlay-dev /opt/clip-int/portage-overlay /opt/clip-int/portage-overlay-clip /opt/clip-int/portage-overlay
+DISTDIR="${CLIP_BASE}/distfiles"
 CONFIG_PROTECT="-* /etc/make.conf"
 EOF
 
